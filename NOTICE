@@ -1,0 +1,24 @@
+DirectorLink · DoorBird for Control4
+Copyright 2026 DirectorLink
+
+This product is licensed under the Apache License 2.0 (see LICENSE).
+
+DirectorLink is an independent project, not affiliated with Control4 or Snap One.
+Not affiliated with or endorsed by Bird Home Automation. Product names are trademarks of their owners.
+
+Credits
+
+No third-party code is included. The driver uses DoorBird's official LAN API
+(LAN-2-LAN API for DoorBird and BirdGuard, revision 0.36,
+https://www.doorbird.com/downloads/api_lan.pdf), as Bird Home Automation's
+license for that API allows for integrations. How events are registered
+(an HTTP favorite per event, attached to the DoorBird's schedule) follows
+Home Assistant's DoorBird integration (https://github.com/home-assistant/core,
+Apache License 2.0) and the DoorBirdPy library
+(https://github.com/klikini/doorbirdpy, MIT License); no code was copied from them.
+
+Control4 interfaces follow the public Snap One DriverWorks documentation
+(https://snap-one.github.io/docs-driverworks-fundamentals/).
+
+The test fixtures in tests/ follow the shape of the DoorBird's answers and
+describe a made-up home; names, addresses, users and ids in them are invented.

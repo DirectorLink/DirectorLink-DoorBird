@@ -1,0 +1,22 @@
+{
+  "sip": {
+    "0": {
+      "title": "Concierge",
+      "value": "1234@sip.example.com"
+    }
+  },
+  "http": {
+    "0": {
+      "title": "Gate log",
+      "value": "http://192.168.50.40/gate/ring"
+    },
+    "1": {
+      "title": "Home Assistant (front_door_motion)",
+      "value": "http://192.168.50.5:8123/api/doorbird/front_door_motion?token=01J2F4B97Y7P1SARXEJ6W07EKD"
+    },
+    "5": {
+      "title": "ServerX",
+      "value": "https://login:Xq7-server-Secret@192.168.50.100?action=notify"
+    }
+  }
+}

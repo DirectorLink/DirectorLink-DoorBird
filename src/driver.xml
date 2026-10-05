@@ -1,0 +1,185 @@
+<devicedata>
+	<copyright>Copyright 2026 DirectorLink</copyright>
+	<creator>DirectorLink</creator>
+	<manufacturer>DoorBird</manufacturer>
+	<name>DirectorLink · DoorBird</name>
+	<model>Video Door Station</model>
+	<created>10/05/2026 00:00</created>
+	<!-- tools/build.py stamps modified and version from the VERSION file -->
+	<modified>10/05/2026 00:00</modified>
+	<version>0</version>
+	<small image_source="c4z">icons/device_sm.png</small>
+	<large image_source="c4z">icons/device_lg.png</large>
+	<control>lua_gen</control>
+	<controlmethod>ip</controlmethod>
+	<driver>DriverWorks</driver>
+	<composer_categories>
+		<category>Cameras</category>
+	</composer_categories>
+	<!-- Never change or remove proxies, connection ids, event ids or property names in later
+	     versions: Control4 projects that already use the driver depend on them. Event 1 (Alert)
+	     and event 2 (Ring) are part of the DirectorLink camera agreement. Events from 101 (one per
+	     doorbell button), from 201 (one per relay) and the relay connections from 301 are added
+	     by the driver at run time (C4:AddEvent, C4:AddDynamicBinding). -->
+	<proxies qty="1">
+		<proxy proxybindingid="5001" name="Camera" primary="True" image_source="c4z" small_image="icons/device_sm.png" large_image="icons/device_lg.png">camera</proxy>
+	</proxies>
+
+	<capabilities>
+		<modes>SNAPSHOT, MJPEG, H264</modes>
+		<has_pan>false</has_pan>
+		<has_tilt>false</has_tilt>
+		<has_zoom>false</has_zoom>
+		<has_home>false</has_home>
+		<has_pan_scan>false</has_pan_scan>
+		<has_tilt_scan>false</has_tilt_scan>
+		<has_night_mode>false</has_night_mode>
+		<number_presets>0</number_presets>
+		<!-- The camera page points at the DoorBird with the Control4 user's Basic login -->
+		<default_http_port>80</default_http_port>
+		<default_rtsp_port>554</default_rtsp_port>
+		<default_authentication_required>true</default_authentication_required>
+		<default_authentication_type>BASIC</default_authentication_type>
+		<default_username></default_username>
+		<default_password></default_password>
+		<default_aspect_ratio>16x9</default_aspect_ratio>
+		<address_readonly>false</address_readonly>
+		<http_port_readonly>false</http_port_readonly>
+		<show_test_url>true</show_test_url>
+		<use_http_for_h264>false</use_http_for_h264>
+		<has_extras>false</has_extras>
+	</capabilities>
+
+	<notification_attachment_provider>true</notification_attachment_provider>
+	<notification_attachments>
+		<attachment>
+			<id>1001</id>
+			<type>IMAGE_JPEG</type>
+			<description>Picture at the last ring or motion alert</description>
+			<source>MEMORY</source>
+		</attachment>
+	</notification_attachments>
+
+	<events>
+		<event><id>1</id><name>Alert</name><description>When NAME raises a motion alert (Alert On Motion is On; once per Motion Alert Hold Time); LAST_ALERT is Motion</description></event>
+		<event><id>2</id><name>Ring</name><description>When a doorbell button of NAME is pressed (any button); LAST_RING says when, LAST_DOORBELL which button</description></event>
+		<event><id>3</id><name>Motion Detected</name><description>When NAME detects motion; LAST_MOTION says when</description></event>
+		<event><id>4</id><name>RFID Read</name><description>When NAME reads an RFID tag; LAST_RFID says when</description></event>
+		<event><id>5</id><name>Door Opened</name><description>When a relay of NAME opens a door or gate (any relay); LAST_RELAY says which</description></event>
+		<event><id>6</id><name>DoorBird Online</name><description>When NAME can be reached again</description></event>
+		<event><id>7</id><name>DoorBird Offline</name><description>When NAME cannot be reached</description></event>
+	</events>
+
+	<conditionals>
+		<conditional>
+			<id>1</id><name>DOORBIRD_ONLINE</name><type>BOOL</type>
+			<condition_statement>DoorBird is</condition_statement><description>NAME is STRING</description>
+			<true_text>Online</true_text><false_text>Offline</false_text>
+		</conditional>
+		<conditional>
+			<id>2</id><name>ALERT_ON_MOTION</name><type>BOOL</type>
+			<condition_statement>Alert on motion is</condition_statement><description>NAME alert on motion is STRING</description>
+			<true_text>On</true_text><false_text>Off</false_text>
+		</conditional>
+	</conditionals>
+
+	<config>
+		<script file="driver.lua" jit="1"/>
+		<documentation file="www/documentation.html"/>
+
+		<properties>
+			<property><name>DoorBird Section</name><type>LABEL</type><default>DoorBird</default></property>
+			<property>
+				<name>Address</name><type>STRING</type><readonly>false</readonly><default></default>
+				<tooltip>The DoorBird's IP address, for example 192.168.1.50. Give the DoorBird a fixed address in the router.</tooltip>
+			</property>
+			<property>
+				<name>Username</name><type>STRING</type><readonly>false</readonly><default></default>
+				<tooltip>The DoorBird user made for Control4 in the DoorBird app (for example abcdef0002), with the permissions API-Operator, Watch Always, History and Motion.</tooltip>
+			</property>
+			<property>
+				<name>Password</name><type>STRING</type><password>true</password><readonly>false</readonly><default></default>
+				<tooltip>That user's password. It is never written to a log.</tooltip>
+			</property>
+
+			<property><name>Status Section</name><type>LABEL</type><default>Status</default></property>
+			<property><name>Status</name><type>STRING</type><readonly>true</readonly><default>Starting...</default></property>
+			<property><name>Attention</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>DoorBird</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>MAC Address</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Relays</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Doorbell Buttons</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Permissions</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Events</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Last Event</name><type>STRING</type><readonly>true</readonly><default></default></property>
+			<property><name>Driver Version</name><type>STRING</type><readonly>true</readonly><default></default></property>
+
+			<property><name>Alerts Section</name><type>LABEL</type><default>Alerts</default></property>
+			<property>
+				<name>Alert On Motion</name><type>LIST</type><readonly>false</readonly><default>Off</default>
+				<items><item>Off</item><item>On</item></items>
+				<tooltip>On: motion also raises the Alert event (LAST_ALERT = Motion), for notifications and DirectorLink. Motion Detected fires either way.</tooltip>
+			</property>
+			<property>
+				<name>Motion Alert Hold Time (s)</name><type>RANGED_INTEGER</type><minimum>10</minimum><maximum>3600</maximum><default>60</default><readonly>false</readonly>
+				<tooltip>After a motion alert, more motion raises no new alert until this long has passed without motion: one visit alerts once.</tooltip>
+			</property>
+			<property>
+				<name>Picture With Events</name><type>LIST</type><readonly>false</readonly><default>Yes</default>
+				<items><item>Yes</item><item>No</item></items>
+				<tooltip>Take a picture at each ring and motion alert, for the notification attachment "Picture at the last ring or motion alert". Ring and Alert then wait up to 1.5 s for it.</tooltip>
+			</property>
+			<property>
+				<name>Record In History</name><type>LIST</type><readonly>false</readonly><default>Yes</default>
+				<items><item>Yes</item><item>No</item></items>
+				<tooltip>Rings, motion alerts and doors opened go to the Control4 History.</tooltip>
+			</property>
+
+			<property><name>Video Section</name><type>LABEL</type><default>Video</default></property>
+			<property>
+				<name>Live Video</name><type>LIST</type><readonly>false</readonly><default>RTSP (port 554)</default>
+				<items><item>RTSP (port 554)</item><item>RTSP over HTTP (port 8557)</item></items>
+				<tooltip>The DoorBird's H.264 stream. Try RTSP first; RTSP over HTTP (8557) is for networks where 554 is blocked. MJPEG (video.cgi) is always offered as the fallback.</tooltip>
+			</property>
+
+			<property><name>Advanced Section</name><type>LABEL</type><default>Advanced</default></property>
+			<property>
+				<name>Log Level</name><type>LIST</type><readonly>false</readonly><default>Info</default>
+				<items><item>Off</item><item>Errors</item><item>Warnings</item><item>Info</item><item>Debug</item><item>Trace</item></items>
+				<tooltip>Debug shows every request to the DoorBird and every call from it (never the password or the event token).</tooltip>
+			</property>
+		</properties>
+
+		<actions>
+			<action><name>Print Diagnostics</name><command>PrintDiagnostics</command></action>
+			<action><name>Test Pictures</name><command>TestPictures</command></action>
+			<action><name>Reconnect</name><command>Reconnect</command></action>
+			<action><name>Open Door (Relay 1)</name><command>OpenDoor</command></action>
+			<action><name>IR Light On</name><command>LightOn</command></action>
+			<action><name>Remove From DoorBird</name><command>RemoveFromDoorBird</command></action>
+		</actions>
+
+		<commands>
+			<command>
+				<name>OPEN_DOOR</name><description>Open the door: pulse relay PARAM1 of NAME</description>
+				<params><param><name>Relay</name><type>DYNAMIC_LIST</type></param></params>
+			</command>
+			<command>
+				<name>LIGHT_ON</name><description>Turn on the IR light of NAME</description>
+			</command>
+			<command>
+				<name>SET_ALERT_ON_MOTION</name><description>Set alert on motion of NAME to PARAM1</description>
+				<params><param><name>State</name><type>LIST</type><items><item>On</item><item>Off</item><item>Toggle</item></items></param></params>
+			</command>
+		</commands>
+	</config>
+
+	<connections>
+		<connection>
+			<id>5001</id><facing>6</facing><connectionname>Camera</connectionname><type>2</type>
+			<consumer>False</consumer><audiosource>False</audiosource><videosource>False</videosource><linelevel>False</linelevel>
+			<classes><class><classname>CAMERA</classname></class></classes>
+			<hidden>true</hidden>
+		</connection>
+	</connections>
+</devicedata>

@@ -1,0 +1,35 @@
+[
+  {
+    "input": "doorbell",
+    "param": "1",
+    "output": [
+      {
+        "event": "notify",
+        "param": "",
+        "schedule": { "weekdays": [ { "to": "82799", "from": "82800" } ] }
+      }
+    ]
+  },
+  {
+    "input": "doorbell",
+    "param": "2",
+    "output": [
+      {
+        "event": "notify",
+        "param": "",
+        "schedule": { "weekdays": [ { "to": "82799", "from": "82800" } ] }
+      }
+    ]
+  },
+  {
+    "input": "motion",
+    "param": "",
+    "output": [
+      {
+        "event": "notify",
+        "param": "",
+        "schedule": { "weekdays": [ { "to": "82799", "from": "82800" } ] }
+      }
+    ]
+  }
+]

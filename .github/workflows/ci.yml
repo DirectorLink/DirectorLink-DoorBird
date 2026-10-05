@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runtime
+        run: |
+          pip install lupa
+          sudo apt-get install -y lua5.1
+      - name: Lua checks
+        run: cd tests && python test_static.py
+      - name: driver.xml checks
+        run: cd tests && python test_xml.py
+      - name: JSON, API answers, event keys
+        run: cd tests && python test_protocol.py
+      - name: The driver against a DoorBird
+        run: cd tests && python test_driver.py
+      - name: Build
+        run: python tools/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DirectorLink-DoorBird
+          path: |
+            dist/DirectorLink-DoorBird.c4z
+            dist/SHA256SUMS.txt

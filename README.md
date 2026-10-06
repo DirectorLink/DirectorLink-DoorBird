@@ -10,7 +10,7 @@ Made by [DirectorLink](https://directorlink.io), the open-source management laye
 
 **Download:** [releases](../../releases) · **Help and updates:** [directorlink.io/drivers/doorbird](https://directorlink.io/drivers/doorbird)
 
-> **Beta.** Runs on a real DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion, the gate opening (*Door Opened*) and opening the gate with a tap on the tile are confirmed in the controller's log. It stays a beta until live video and a Relay Gate Controller bound to the relay are confirmed too. If you try it, please send the log: see [Testing the beta](#testing-the-beta).
+> **Tested on a DoorBird D2101KV** (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion, the gate opening (*Door Opened*) and opening the gate with a tap on the tile, confirmed in the controller's log. Reports from other models are welcome: see [Trying it next to the official driver](#trying-it-next-to-the-official-driver).
 
 ## What you get
 
@@ -41,13 +41,13 @@ In Composer the driver adds two devices to the room:
 
 ## Installation
 
-1. Download `DirectorLink-DoorBird.c4z` from the [releases](../../releases) (the beta is marked *Pre-release*).
+1. Download `DirectorLink-DoorBird.c4z` from the [releases](../../releases).
 2. In Composer Pro: **Driver → Add or Update Driver or Agent**.
 3. Search **DirectorLink** and add **DirectorLink · DoorBird** to the room of the door.
 
 > **Keep the exact file name.** If your browser saves a second copy as `DirectorLink-DoorBird (1).c4z`, rename it before you upload. Composer knows a driver by its file name, so a renamed copy installs as a separate driver instead of updating the one you have.
 
-> **Coming from 1.0.0-beta.1?** Beta.2 adds different devices (a tile and a camera instead of one camera), so it cannot update a beta.1 in place. First run **Remove From DoorBird** on the beta.1 driver and delete it, then upload and add beta.2, and redo its bindings and programming. A beta.1 that was deleted without Remove From DoorBird leaves HTTP calls on the DoorBird: beta.2 finds them and removes them.
+> **Coming from 1.0.0-beta.1?** Since beta.2 the driver adds different devices (a tile and a camera instead of one camera), so it cannot update a beta.1 in place. First run **Remove From DoorBird** on the beta.1 driver and delete it, then upload and add this version, and redo its bindings and programming. A beta.1 that was deleted without Remove From DoorBird leaves HTTP calls on the DoorBird: this version finds them and removes them. From beta.2 or beta.3 it updates in place.
 
 ## Setup
 
@@ -156,7 +156,7 @@ Without DirectorLink the driver works the same.
 
 1. Download the new `DirectorLink-DoorBird.c4z` from the [releases](../../releases).
 2. Check that the name is exactly `DirectorLink-DoorBird.c4z`, not `... (1).c4z`.
-3. **Driver → Add or Update Driver or Agent**. The driver keeps its settings, its HTTP calls on the DoorBird, the relay connections and the programming. (From beta.1 to beta.2, see [Installation](#installation).)
+3. **Driver → Add or Update Driver or Agent**. The driver keeps its settings, its HTTP calls on the DoorBird, the relay connections and the programming. (From 1.0.0-beta.1, see [Installation](#installation).)
 
 ## Troubleshooting
 
@@ -175,9 +175,9 @@ Without DirectorLink the driver works the same.
 
 For details run **Print Diagnostics**, with **Log Level** set to *Debug*. The output appears in the Lua tab and in the driver log.
 
-## Testing the beta
+## Trying it next to the official driver
 
-The beta needs confirmation on a real system. A safe way is next to an official DoorBird driver that already works, with its own user:
+To try the driver on a system that already works, run it next to the official DoorBird driver, with its own user:
 
 1. **Before:** note that the official driver's events (ring, motion) and its gate work.
 2. In the DoorBird app make a **second** user for this driver (API-Operator, Watch Always, History, Motion).

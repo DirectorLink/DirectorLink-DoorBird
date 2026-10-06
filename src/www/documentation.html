@@ -36,7 +36,7 @@
 <div class="hero">
   <img src="icons/doorbird_300.png" alt="">
   <div>
-    <h1>DirectorLink &middot; DoorBird <span class="badge">BETA</span></h1>
+    <h1>DirectorLink &middot; DoorBird</h1>
     <div class="tag">Free, open-source Control4 driver for DoorBird video door stations. Part of DirectorLink Drivers.</div>
     <p class="url">https://directorlink.io/drivers/doorbird</p>
     <p>Doorbell rings, motion and RFID events, pictures and live video, and the DoorBird's relays for doors and gates. On the home network, with DoorBird's official LAN API.</p>
@@ -56,7 +56,7 @@
   <li><b>The gate:</b> <b>Gate Relay</b> (<i>Relay 1</i> by default, or <i>Nothing</i>) is what a tap on the tile opens. For a Control4 <i>Relay Gate</i>, <i>Door</i> or <i>Garage Controller</i>, bind it under <i>Connections &rarr; Control</i> to <b>Relay 1</b> (or another relay).</li>
 </ol>
 <p class="note"><b>Next to the official DoorBird driver.</b> Both can run on the same DoorBird and the same controller, each with its own DoorBird user. This driver changes only what it made on the DoorBird. <b>Control4 Intercom and audio/SIP are not part of this driver:</b> if you use Control4 Intercom with the DoorBird, keep the official DoorBird driver for that.</p>
-<p class="note"><b>Coming from 1.0.0-beta.1?</b> Beta.2 adds different devices, so it cannot update a beta.1 in place: run <b>Remove From DoorBird</b> on beta.1 and delete it, then add beta.2 and make its bindings and programming again.</p>
+<p class="note"><b>Coming from 1.0.0-beta.1?</b> Since beta.2 the driver adds different devices, so it cannot update a beta.1 in place: run <b>Remove From DoorBird</b> on beta.1 and delete it, then add this driver and make its bindings and programming again. From beta.2 or beta.3 it updates in place.</p>
 
 <h2>How it works</h2>
 <p><b>Events</b>, the way Home Assistant does it: the driver runs a small HTTP server on the controller (a port from 47300, shown by Print Diagnostics) and adds its own <b>HTTP calls</b> on the DoorBird, named <code>DirectorLink (doorbell 1)</code>, <code>DirectorLink (keypad code &hellip;)</code>, <code>DirectorLink (motion)</code>, <code>DirectorLink (RFID)</code>, <code>DirectorLink (relay 1)</code>, each with a random token in its address. It puts them into the DoorBird's schedule for each doorbell button, keypad code, motion, the RFID tags and each relay, the whole week. Every other HTTP call, push notification, SIP call and relay in the schedule stays as it was: each entry is read just before it is written and checked right after, and put back if the DoorBird dropped or changed anything else. The driver takes a call only from the DoorBird's address and with its token. The same event again within 5 seconds is one event.</p>
@@ -88,6 +88,7 @@
 <h2>Change log</h2>
 <table>
   <tr><th>Version</th><th>Changes</th></tr>
+  <tr><td>1.0.0</td><td>First full release: the 1.0.0-beta.3 driver, tested on a DoorBird D2101KV.</td></tr>
   <tr><td>1.0.0-beta.3</td><td>The tile shows the gate opening after a ring (the ring hid it).</td></tr>
   <tr><td>1.0.0-beta.2</td><td>Two devices: the DoorBird tile (shows rings, motion, the gate, offline; a tap opens the gate) and the DoorBird Camera. Eight properties; Gate Relay and Open Gate. Keypad codes (masked in logs). Ring per button only with several buttons, one Door Opened. Not an update for beta.1.</td></tr>
   <tr><td>1.0.0-beta.1</td><td>First release (beta).</td></tr>

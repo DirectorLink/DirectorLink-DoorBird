@@ -2,6 +2,13 @@
 
 All notable changes to DirectorLink · DoorBird for Control4. Versions follow the `VERSION` file; the driver version Composer compares is in brackets.
 
+## 1.0.0 (1000099) - 2026-10-06
+
+First full release. The driver is the same as 1.0.0-beta.3, tested on a DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion, the gate opening (*Door Opened*), the tile, and opening the gate with a tap on the tile, confirmed in the controller's log.
+
+- From beta.2 or beta.3: updates in place (settings, bindings and programming stay).
+- From beta.1: run Remove From DoorBird on beta.1 and delete it, then add this version (since beta.2 the driver adds different devices).
+
 ## 1.0.0-beta.3 (1000003) - 2026-10-06
 
 - The tile shows the gate opening after a ring. On the real DoorBird a visitor rang and the gate opened 10 seconds later: *Door Opened* fired, but the tile kept showing the ring, which outranked the gate. A ring and the gate opening now replace each other (the newer shows); motion still hides neither.

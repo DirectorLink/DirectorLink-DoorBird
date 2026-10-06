@@ -31,8 +31,14 @@
         its outputs are taken out first; its favorites are deleted only
         after a read shows none of them is in the schedule any more (the
         DoorBird removes schedule entries that use a deleted favorite);
-      - a change of address or login stops what was on its way: nothing
-        made for one DoorBird reaches another.
+      - a write whose read back never came (the DoorBird stopped answering,
+        or took a new password at that moment) is remembered with the entry
+        as it was before; at the next chance (the next check, after a
+        restart, or when leaving that DoorBird) any other output missing
+        from it is put back;
+      - a change of address or login waits for the job on its way to end,
+        and anything still made for the old one is cancelled: nothing made
+        for one DoorBird reaches another.
     Favorites of an earlier copy of this driver on the same controller and
     port ("DirectorLink (...)" at this event server, another token) are
     removed the same way.
@@ -50,6 +56,7 @@ gReg = {
 	favorites = {},  -- key -> favorite id (this driver's, on gReg.host)
 	created = {},    -- EntryKey(input, param) -> true: schedule entries this driver created there
 	skip = {},       -- EntryKey -> { sig = the entry's other outputs then, text = why }: left alone
+	unchecked = {},  -- EntryKey -> the entry as it was before a write whose read back never came
 	host = "",       -- the DoorBird they are on
 	wrote = nil,     -- the DoorBird this driver has written to (set before the first write: a job cut
 	                 -- short by a new address still leaves the old DoorBird to clean up)
@@ -363,10 +370,11 @@ local function WhyNot(code, err)
 end
 
 --[[------------------------------------------------------------------ Jobs
-    One job at a time (a sync or a removal). A job that is no longer the
-    current one (a new address or login, the driver deleted) stops at its
-    next step; what it would still send is cancelled by the target's new
-    generation.                                                             ]]
+    One job at a time (a sync or a removal), never cut short: a write is
+    always followed by its read back (and its put-back). The driver applies a
+    new address or login only once the job on its way to the DoorBird has
+    ended (RegistrationBusyWith). As a last guard, a job whose target's
+    generation changed stops at its next step and sends nothing more.      ]]
 local function StartJob(t, kind)
 	local job = { t = t, gen = t.gen, host = t.host, kind = kind, problems = {}, changes = {} }
 	gReg.busy, gReg.job = true, job
@@ -403,13 +411,9 @@ local function Each(job, list, fn, done)
 	step()
 end
 
--- Stop the job on its way to this target (a new address or login, the driver deleted); nothing of
--- it is kept. A job on another target (leaving an old DoorBird) goes on.
-function RegistrationAbort(t)
-	if gReg.job and (t == nil or gReg.job.t == t) then
-		gReg.busy, gReg.job = false, nil
-	end
-	if t == nil then gReg.again = false end
+-- A job on its way to this target
+function RegistrationBusyWith(t)
+	return gReg.job ~= nil and gReg.job.t == t
 end
 
 --[[------------------------------------------------------------------ Writing entries
@@ -424,7 +428,64 @@ local function SetProblem(job, input, param, text)
 	end
 end
 
+-- A write whose read back never came: the other outputs of the entry as it was then that are missing
+-- now, put back (and this driver's output taken out: the DoorBird keeps one or the other)
+local function PlanRepair(job, target, e)
+	local before = target.repair
+	local ck = EntryKey(target.input, target.param)
+	if e and IsUnknownEntry(e) then return nil end
+	local now = e and OthersOf(e, job.managed) or {}
+	local counts, missing, names, seen = {}, {}, {}, {}
+	for _, o in ipairs(Outputs(before)) do
+		if not (OutputEvent(o) == "http" and job.managed[OutputParam(o)]) then
+			local k = OtherKey(o)
+			counts[k] = (counts[k] or 0) + 1
+			if counts[k] > (now[k] or 0) then
+				missing[#missing + 1] = JsonCopy(o)
+				local what = DescribeOther(k, job.favs)
+				if not seen[what] then
+					seen[what] = true
+					names[#names + 1] = what
+				end
+			end
+		end
+	end
+	if #missing == 0 then
+		-- Nothing was lost then
+		job.unchecked[ck] = nil
+		Persist()
+		return nil
+	end
+	-- In the order the entry had then; outputs other apps added since go after
+	local outputs, used = {}, {}
+	local nowList = {}
+	for _, o in ipairs(Outputs(e)) do
+		if not (OutputEvent(o) == "http" and job.managed[OutputParam(o)]) then nowList[#nowList + 1] = o end
+	end
+	for _, o in ipairs(Outputs(before)) do
+		if not (OutputEvent(o) == "http" and job.managed[OutputParam(o)]) then
+			local k, found = OtherKey(o), nil
+			for i, x in ipairs(nowList) do
+				if not used[i] and OtherKey(x) == k then
+					found = i
+					break
+				end
+			end
+			if found then used[found] = true end
+			outputs[#outputs + 1] = JsonCopy(found and nowList[found] or o)
+		end
+	end
+	for i, x in ipairs(nowList) do
+		if not used[i] then outputs[#outputs + 1] = JsonCopy(x) end
+	end
+	local new = JsonCopy(e or before)
+	new.output = outputs
+	table.sort(names)
+	return { input = target.input, param = target.param, new = new, before = e, wantIds = {}, repair = before, missing = names }
+end
+
 local function PlanChange(job, target, e)
+	if target.repair then return PlanRepair(job, target, e) end
 	local input, param = target.input, target.param
 	local ck = EntryKey(input, param)
 	local want, wantList = job.want(input, param)
@@ -516,7 +577,14 @@ local function ApplyChanges(job, done)
 			if not entries then
 				job.readError = "the schedule could not be read back: " .. WhyNot(code, err)
 				LogWarn("DoorBird events: %s", job.readError)
-				if pending then pending.verified, pending.unchecked = false, true end
+				if pending then
+					pending.verified, pending.unchecked = false, true
+					-- Checked at the next chance, against the entry as it was before this write
+					if pending.before and not pending.remove and not pending.repair and job.unchecked then
+						job.unchecked[EntryKey(pending.input, pending.param)] = pending.before
+						Persist()
+					end
+				end
 				return done(nil)
 			end
 			fn(entries)
@@ -528,7 +596,27 @@ local function ApplyChanges(job, done)
 			local ch = pending
 			pending = nil
 			CheckChange(job, ch, entries)
-			if ch.harmed and ch.before then
+			if ch.repair then
+				local ck = EntryKey(ch.input, ch.param)
+				local now = FindEntry(entries, ch.input, ch.param)
+				local have, back = now and OthersOf(now, job.managed) or {}, true
+				for k, n in pairs(OthersOf(ch.repair, job.managed)) do
+					if (have[k] or 0) < n then back = false end
+				end
+				if back then
+					job.unchecked[ck] = nil
+					ch.repaired = true
+					local text = "the DoorBird keeps one HTTP call for " .. EntryLabel(ch.input, ch.param) .. ", and " .. table.concat(ch.missing, ", ") .. " has it"
+					LogWarn("Put back %s in %s: the DoorBird had dropped it when this driver's HTTP call was written (it could not be checked then)",
+						table.concat(ch.missing, ", "), EntryLabel(ch.input, ch.param))
+					if job.skip then job.skip[ck] = { sig = OthersSignature(now, job.managed), text = text } end
+					SetProblem(job, ch.input, ch.param, text)
+				else
+					LogError("Putting back %s in %s did not work: it is tried again at the next check", table.concat(ch.missing, ", "), EntryLabel(ch.input, ch.param))
+				end
+				Persist()
+			end
+			if ch.harmed and ch.before and not ch.repair then
 				return PostEntry(t, job.gen, ch.before, function(ok, code, err)
 					ch.restored = ok
 					if not ok then LogError("Putting %s back failed: %s", EntryLabel(ch.input, ch.param), WhyNot(code, err)) end
@@ -542,14 +630,15 @@ local function ApplyChanges(job, done)
 		local ch = PlanChange(job, target, FindEntry(entries, target.input, target.param))
 		if not ch then return nextChange(entries) end
 		job.changes[#job.changes + 1] = ch
+		-- Created from a read that showed no such entry: this driver's from the moment it is sent (a
+		-- whole entry is only ever removed when nothing else is in it)
+		if ch.created then
+			job.created[EntryKey(ch.input, ch.param)] = true
+			if RegistrationSaved then pcall(RegistrationSaved) end
+		end
 		local function after(ok, code, err)
 			ch.ok, ch.code, ch.err = ok, code, err
 			if not ok then LogWarn("Schedule %s: %s", EntryLabel(ch.input, ch.param), WhyNot(code, err)) end
-			-- Created from a read that showed no such entry: this driver's, even if the job is cut short
-			if ok and ch.created then
-				job.created[EntryKey(ch.input, ch.param)] = true
-				if RegistrationSaved then pcall(RegistrationSaved) end
-			end
 			pending = ch
 			readThen(nextChange)
 		end
@@ -562,6 +651,13 @@ end
 -- The entries (from a read) that need a change, and the entries to create
 local function Targets(job, entries, creatable)
 	local targets = {}
+	local repairs = {}
+	for ck, before in pairs(job.unchecked or {}) do repairs[#repairs + 1] = ck end
+	table.sort(repairs)
+	for _, ck in ipairs(repairs) do
+		local before = job.unchecked[ck]
+		targets[#targets + 1] = { input = EntryInput(before), param = EntryParam(before), repair = before }
+	end
 	for _, e in ipairs(entries) do
 		if PlanChange(job, { input = EntryInput(e), param = EntryParam(e) }, e) then
 			targets[#targets + 1] = { input = EntryInput(e), param = EntryParam(e) }
@@ -595,12 +691,14 @@ local function Results(job, saves, drops, entries, after)
 	local t = job.t
 	for _, ch in ipairs(job.changes) do
 		local ck = EntryKey(ch.input, ch.param)
-		if ch.created and ch.ok and ch.verified == false and not ch.unchecked and after and not FindEntry(after, ch.input, ch.param) then
-			-- The DoorBird took it but does not show it: nothing of this driver's there to remember
+		if ch.created and ch.verified == false and not ch.unchecked and after and not FindEntry(after, ch.input, ch.param) then
+			-- Not there after all: nothing of this driver's to remember
 			gReg.created[ck] = nil
 		end
 		if ch.remove and ch.ok and ch.verified then gReg.created[ck] = nil end
-		if ch.unchecked and not ch.remove then
+		if ch.repair then
+			-- Reported where it was put back
+		elseif ch.unchecked and not ch.remove then
 			SetProblem(job, ch.input, ch.param, job.readError or "could not be checked")
 		elseif not ch.verified and not ch.remove and ch.verified ~= nil then
 			local label = EntryLabel(ch.input, ch.param)
@@ -674,7 +772,7 @@ function RegistrationSync(t, ctx, done)
 	end
 	local job = StartJob(t, "sync")
 	job.done, job.ctx = done, ctx
-	job.created, job.skip = gReg.created, gReg.skip
+	job.created, job.skip, job.unchecked = gReg.created, gReg.skip, gReg.unchecked
 	SetSummary("working", "checking the DoorBird's HTTP calls")
 	ReadFavorites(t, job.gen, function(favs, code, err, sipCount)
 		if not Current(job) then return end
@@ -783,10 +881,23 @@ function RegistrationSync(t, ctx, done)
 							end
 						end
 						if not after and #job.drop > 0 then LogWarn("Not deleting old favorites now: the schedule could not be read back") end
-						Each(job, drops, function(id, nextStep)
-							DeleteFavorite(t, job.gen, id, function() nextStep() end)
-						end, function()
-							Results(job, saves, drops, entries, after)
+						local function results() Results(job, saves, drops, entries, after) end
+						if #drops == 0 then return results() end
+						-- Read once more right before deleting: a favorite still in the schedule is not deleted
+						ReadSchedule(t, job.gen, function(fresh)
+							if not Current(job) then return end
+							local sure = {}
+							for _, id in ipairs(drops) do
+								local still = not fresh
+								for _, e in ipairs(fresh or {}) do
+									if OwnIdsIn(e, { [id] = true })[id] then still = true end
+								end
+								if not still then sure[#sure + 1] = id end
+							end
+							drops = sure
+							Each(job, drops, function(id, nextStep)
+								DeleteFavorite(t, job.gen, id, function() nextStep() end)
+							end, results)
 						end)
 					end)
 				end
@@ -815,15 +926,16 @@ end
     done(ok, count, err).
     created: the entries this driver created on that DoorBird; nil for the
     current one (gReg.created, cleared once it is left).                    ]]
-function RegistrationRemove(t, token, done, why, created)
+function RegistrationRemove(t, token, done, why, created, unchecked)
 	if gReg.busy then
 		-- After the job on its way
-		SetTimer("REG_REMOVE_LATER_" .. t.host, 2000, function() RegistrationRemove(t, token, done, why, created) end)
+		SetTimer("REG_REMOVE_LATER_" .. t.host, 2000, function() RegistrationRemove(t, token, done, why, created, unchecked) end)
 		return
 	end
 	local current = created == nil
 	local job = StartJob(t, "remove")
 	job.created = created or gReg.created
+	job.unchecked = unchecked or gReg.unchecked
 	LogInfo("Removing this driver's HTTP calls from the DoorBird at %s (%s)", t.host, why or "")
 	local function finish(ok, count, err)
 		if not EndJob(job) then return end
@@ -858,8 +970,13 @@ function RegistrationRemove(t, token, done, why, created)
 			ApplyChanges(job, function(after)
 				if not Current(job) then return end
 				if not after then return finish(false, 0, job.readError or "the schedule could not be read back") end
+				if next(job.unchecked) then return finish(false, 0, "an entry could not be put back yet") end
+				-- Read once more right before deleting: favorites are deleted only when none is in the schedule
+				ReadSchedule(t, job.gen, function(fresh, fcode, ferr)
+				if not Current(job) then return end
+				if not fresh then return finish(false, 0, WhyNot(fcode, ferr)) end
 				local left = 0
-				for _, e in ipairs(after) do
+				for _, e in ipairs(fresh) do
 					if next(OwnIdsIn(e, own)) then left = left + 1 end
 				end
 				if left > 0 then
@@ -874,6 +991,7 @@ function RegistrationRemove(t, token, done, why, created)
 				end, function()
 					LogInfo("Removed %d HTTP call%s from the DoorBird at %s", deleted, deleted == 1 and "" or "s", t.host)
 					finish(deleted == #ids, deleted, deleted == #ids and nil or "some favorites could not be deleted")
+				end)
 				end)
 			end)
 		end)

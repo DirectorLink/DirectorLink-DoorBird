@@ -47,6 +47,7 @@ function NewTarget(t)
 	t.lockedUntil = 0  -- NowMs() until which the DoorBird blocks this controller (423)
 	t.queue = {}
 	t.busy = false
+	t.inflight = false -- a request sent and not answered yet
 	t.lastStartMs = 0
 	t.history = {}
 	t.requests, t.failures = 0, 0
@@ -117,6 +118,7 @@ local function Send(t, job)
 	local function finish(code, body, err, headers)
 		if finished then return end
 		finished = true
+		t.inflight = false
 		if guard then pcall(function() guard:Cancel() end) end
 		local ms = NowMs() - started
 		if job.gen ~= t.gen then
@@ -148,6 +150,7 @@ local function Send(t, job)
 	}
 	if opts.body then headers["Content-Type"] = opts.contentType or "application/json" end
 	LogTrace("%s %s (sending)", opts.method, label)
+	t.inflight = true
 	local sent, sendErr = pcall(function()
 		local x = C4:url()
 		x:SetOptions({ fail_on_error = false, timeout = opts.timeout or API_TIMEOUT_S, connect_timeout = 5 })

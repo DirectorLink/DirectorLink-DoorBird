@@ -103,16 +103,21 @@ local function SaveCfg()
 		for k in pairs(gReg.created) do created[#created + 1] = k end
 		local skip = {}
 		for k, v in pairs(gReg.skip) do skip[#skip + 1] = { k, v.sig, v.text } end
+		local function uncheckedList(map)
+			local list = {}
+			for k, e in pairs(map or {}) do list[#list + 1] = { k, e } end
+			return list
+		end
 		local olds = {}
 		for _, o in ipairs(gCfg.olds) do
 			local oc = {}
 			for k in pairs(o.created or {}) do oc[#oc + 1] = k end
-			olds[#olds + 1] = { host = o.host, user = o.user, mac = o.mac, tries = o.tries, created = oc }
+			olds[#olds + 1] = { host = o.host, user = o.user, mac = o.mac, tries = o.tries, created = oc, unchecked = uncheckedList(o.unchecked) }
 		end
 		C4:PersistSetValue("DL_STATE", JsonEncode({
 			port = gCfg.port, relays = relays, buttons = buttons,
 			info = { model = gInfo.model, firmware = gInfo.firmware, build = gInfo.build, mac = gInfo.mac, relays = gInfo.relays },
-			reg = { host = gReg.host, wrote = gReg.wrote, favorites = favorites, created = created, skip = skip },
+			reg = { host = gReg.host, wrote = gReg.wrote, favorites = favorites, created = created, skip = skip, unchecked = uncheckedList(gReg.unchecked) },
 			olds = olds, paused = gCfg.paused,
 		}))
 		local vars = {}
@@ -157,14 +162,20 @@ local function LoadCfg()
 				for _, v in ipairs(JsonField(reg, "skip") or {}) do
 					if type(v) == "table" and v[1] then gReg.skip[tostring(v[1])] = { sig = tostring(v[2] or ""), text = tostring(v[3] or "") } end
 				end
+				for _, v in ipairs(JsonField(reg, "unchecked") or {}) do
+					if type(v) == "table" and v[1] and JsonIsObject(v[2]) then gReg.unchecked[tostring(v[1])] = v[2] end
+				end
 			end
 			gCfg.paused = JsonField(s, "paused") == true
 			for _, o in ipairs(JsonField(s, "olds") or {}) do
 				if type(o) == "table" and JsonField(o, "host") then
-					local oc = {}
+					local oc, ou = {}, {}
 					for _, k in ipairs(JsonField(o, "created") or {}) do oc[tostring(k)] = true end
+					for _, v in ipairs(JsonField(o, "unchecked") or {}) do
+						if type(v) == "table" and v[1] and JsonIsObject(v[2]) then ou[tostring(v[1])] = v[2] end
+					end
 					gCfg.olds[#gCfg.olds + 1] = { host = tostring(JsonField(o, "host")), user = tostring(JsonField(o, "user") or ""),
-						mac = tostring(JsonField(o, "mac") or ""), tries = tonumber(JsonField(o, "tries")) or 0, created = oc }
+						mac = tostring(JsonField(o, "mac") or ""), tries = tonumber(JsonField(o, "tries")) or 0, created = oc, unchecked = ou }
 				end
 			end
 		end
@@ -275,7 +286,7 @@ end
 --[[=============================================================================
     Status and attention
 ===============================================================================]]
-local SyncEvents, Connect, UpdateEventsProperty, KeepOld -- forward
+local SyncEvents, Connect, UpdateEventsProperty, KeepOld, LeaveAfterInfo -- forward
 
 local ATTENTION_ORDER = { "login", "address", "operator", "watch", "history", "firmware", "events", "server", "proxy", "old" }
 
@@ -776,7 +787,7 @@ end
 
 -- Register (or check) this driver's HTTP calls on the DoorBird
 SyncEvents = function(reason)
-	if not Configured() or gBird.authFailed or gState.removed then return end
+	if not Configured() or gBird.authFailed or gState.removed or gState.loginPending then return end
 	if gCfg.paused and reason ~= "reconnect" then return end
 	-- Only once info.cgi took this login (a wrong password costs one request, not more)
 	if gState.online ~= true or not gBird.verified then return end
@@ -874,6 +885,7 @@ local function OnInfo(code, body, err, reason)
 				KeepOld(o, "The DoorBird at " .. gBird.host .. " is the one that was at " .. o.host .. " (the same MAC)")
 			end
 		end
+		LeaveAfterInfo()
 		SetOnline(true)
 		UpdateStatus()
 		local first = reason ~= "health"
@@ -884,6 +896,7 @@ local function OnInfo(code, body, err, reason)
 		end
 		return
 	end
+	LeaveAfterInfo()
 	if code == 401 then
 		SetOnline(false)
 		SetAttention("login", "The DoorBird refused the login of '" .. gBird.user .. "': check the Username and Password (the user made for Control4 in the DoorBird app)")
@@ -902,7 +915,10 @@ end
 -- for while a request is on its way runs after it.
 local function RequestInfo(reason, label, force)
 	gState.connecting = true
+	local gen = gBird.gen
 	DoorBirdRequest(gBird, { path = "/bha-api/info.cgi", label = label, force = force }, function(code, body, err)
+		-- An answer (or "cancelled") meant for an earlier address or login: not this one's
+		if gen ~= gBird.gen then return end
 		local ok, e = pcall(OnInfo, code, body, err, reason)
 		if not ok then
 			gState.connecting = false
@@ -915,7 +931,7 @@ local function RequestInfo(reason, label, force)
 end
 
 Connect = function(reason)
-	if gState.removed then return end
+	if gState.removed or gState.loginPending then return end
 	UpdateStatus()
 	if not Configured() then return end
 	if gState.connecting then
@@ -927,7 +943,7 @@ Connect = function(reason)
 end
 
 local function HealthCheck()
-	if not Configured() or gBird.authFailed or gState.connecting or gState.removed then return end
+	if not Configured() or gBird.authFailed or gState.connecting or gState.removed or gState.loginPending then return end
 	-- The controller's address changed: the HTTP calls must point at the new one
 	local ctrl = ControllerAddress()
 	if ctrl and gState.ctrlIp and ctrl ~= gState.ctrlIp then
@@ -961,10 +977,12 @@ local function UpdateOldAttention()
 		.. ": it tries again every " .. (OLD_RETRY_S / 60) .. " minutes") or nil)
 end
 
--- An old DoorBird that is the current one again (by address, or by MAC once connected): nothing to leave
+-- An old DoorBird that is the current one again (by address, or by MAC once connected): nothing to leave.
+-- (A retry already on its way there finishes; the next check puts back what it removed.)
 KeepOld = function(o, why)
 	LogInfo("%s: this driver's HTTP calls there are kept and updated, not removed", why)
 	for k in pairs(o.created or {}) do gReg.created[k] = true end
+	for k, e in pairs(o.unchecked or {}) do gReg.unchecked[k] = e end
 	DropOld(o)
 	SaveCfg()
 	UpdateOldAttention()
@@ -1015,13 +1033,33 @@ local function LeaveOldDoorBird()
 			KillTimer("OLD_RETRY")
 		end
 		SyncEvents("address changed")
-	end, "the address changed", o.created or {})
+	end, "the address changed", o.created or {}, o.unchecked or {})
 end
 
--- The Address, Username or Password changed (applied once the installer is done typing)
+-- Leaving starts once the new address has answered info.cgi (so a DoorBird that only moved is known by
+-- its MAC first), and never while a request to the old address may still be on its way
+LeaveAfterInfo = function()
+	if not gState.leaveAfterInfo then return end
+	gState.leaveAfterInfo = false
+	if #gCfg.olds > 0 then LeaveOldDoorBird() end
+end
+
+-- The Address, Username or Password changed (applied once the installer is done typing, and once the
+-- job and the request on their way to the DoorBird have ended: a write is never left without its
+-- read back, and the old and the new address never get requests at the same time)
 local function ApplyLogin()
 	local host, user, pass = trim(Properties["Address"] or ""), trim(Properties["Username"] or ""), Properties["Password"] or ""
-	if host == gBird.host and user == gBird.user and pass == gBird.pass then return end
+	if host == gBird.host and user == gBird.user and pass == gBird.pass then
+		gState.loginPending = false
+		return
+	end
+	if RegistrationBusyWith(gBird) or gBird.inflight then
+		if not gState.loginPending then LogInfo("The new login waits for the DoorBird to finish what it is doing") end
+		gState.loginPending = true
+		SetTimer("LOGIN_APPLY", 1000, ApplyLogin)
+		return
+	end
+	gState.loginPending = false
 	local oldHost, oldUser, oldPass = gBird.host, gBird.user, gBird.pass
 	if host ~= oldHost then
 		-- Also when a job was cut short there: what it wrote goes too
@@ -1037,20 +1075,20 @@ local function ApplyLogin()
 					gCfg.oldPass[dropped.host] = nil
 					LogWarn("Too many DoorBirds to leave: %s is no longer tried (remove its 'DirectorLink (...)' HTTP calls by hand)", dropped.host)
 				end
-				gCfg.olds[#gCfg.olds + 1] = { host = oldHost, user = oldUser, mac = gInfo.mac, tries = 0, created = gReg.created }
+				gCfg.olds[#gCfg.olds + 1] = { host = oldHost, user = oldUser, mac = gInfo.mac, tries = 0, created = gReg.created, unchecked = gReg.unchecked }
 				gCfg.oldPass[oldHost] = oldPass
 			end
 		end
-		-- What was made on the old DoorBird belongs to it, not to the new one
-		gReg.created, gReg.favorites, gReg.skip, gReg.host, gReg.wrote = {}, {}, {}, "", nil
+		-- What was made and read on the old DoorBird belongs to it, not to the new one
+		gReg.created, gReg.favorites, gReg.skip, gReg.host, gReg.wrote, gReg.unchecked = {}, {}, {}, "", nil, {}
+		gReg.favs, gReg.entries, gReg.sipCount = nil, nil, 0
 		for i = #gCfg.olds, 1, -1 do
 			if gCfg.olds[i].host == host then KeepOld(gCfg.olds[i], "Back at the DoorBird " .. host) end
 		end
 	end
-	-- What was on its way to the DoorBird stops: nothing made for the old login or address reaches the new one
-	RegistrationAbort(gBird)
+	-- Nothing is on its way now; what waits in the queue (made for the old login) is cancelled
 	SetTargetLogin(gBird, host, user, pass)
-	gState.connecting = false
+	gState.connecting, gState.connectAgain = false, nil
 	if host ~= oldHost then
 		gInfo = { model = "", firmware = "", build = "", mac = "", relays = gInfo.relays, at = nil }
 		gPerm = { operator = nil, watch = nil, history = nil, motion = nil, checkedAt = nil }
@@ -1063,7 +1101,7 @@ local function ApplyLogin()
 	LogInfo("DoorBird login: %s, user '%s'", host ~= "" and host or "(no address)", user)
 	SetAttention("login", nil)
 	UpdatePermissions()
-	if #gCfg.olds > 0 then LeaveOldDoorBird() end
+	gState.leaveAfterInfo = #gCfg.olds > 0
 	Connect("login changed")
 end
 
@@ -1412,8 +1450,6 @@ function OnDriverRemovedFromProject()
 	gState.removed = true
 	if not Configured() or not gCfg.token then return end
 	LogInfo("The driver was deleted: removing its HTTP calls from the DoorBird at %s", gBird.host)
-	RegistrationAbort(gBird)
-	TargetCancelQueue(gBird, "the driver was deleted")
 	RegistrationRemove(gBird, gCfg.token, function(ok, count, err)
 		if ok then LogInfo("Removed %d HTTP calls from the DoorBird", count) else LogWarn("Removing the HTTP calls: %s", tostring(err)) end
 	end, "the driver was deleted")

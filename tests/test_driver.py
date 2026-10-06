@@ -744,4 +744,126 @@ d.advance(900 * 1000)
 d.pump(10000)
 check(a.wrong_logins == 1 and d.eval("#gCfg.olds") == 0, f"an old DoorBird that refuses the old login: one try, then given up ({a.wrong_logins})")
 
+# ================================================================ a write never left without its check
+def run_until_post(d, marker):
+    """Async HTTP: run the driver until a POST whose body has `marker` has been answered."""
+    for _ in range(400):
+        d.pump(5000, 1)
+        if d.eval("#HTTP_QUEUE") > 0:
+            last = d.g.HTTP_LOG[d.eval("#HTTP_LOG")]
+            hit = last.method == "POST" and marker in (last.body or "")
+            d.flush_http()
+            if hit:
+                return True
+    return False
+
+
+def settle(d, rounds=60):
+    for _ in range(rounds):
+        d.pump()
+        d.flush_http()
+    d.async_http(False)
+    for _ in range(5):
+        d.pump()
+
+
+# The DoorBird takes a new password (in the DoorBird app and in Composer) just after this driver wrote an
+# entry on a DoorBird that keeps one HTTP call: the read back is refused, so the check happens later
+bird = DoorBird(one_http_per_input=True, keep="last")
+d = Driver(bird, props=PROPS)
+bird.clock = d.now
+d.async_http()
+d.call("OnDriverInit", "DIT_ADDING")
+d.call("OnDriverLateInit", "DIT_ADDING")
+check(run_until_post(d, '"input":"doorbell"'), "the doorbell 1 write went out")
+check(("http", "0") not in bird.outputs_of("doorbell", "1"), "(that DoorBird dropped the other app's call)")
+d.g.Properties["Password"] = "New-Pass-1"
+d.call("OnPropertyChanged", "Password")
+bird.password = "New-Pass-1"
+settle(d)
+check(bird.outputs_of("doorbell", "1") == [("notify", ""), ("http", "0"), ("sip", "0")] and bird.others_unchanged(d.token())[0],
+      "the other app's call is put back where it was, once the DoorBird answers again")
+check("the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.prop("Attention"), "and Attention says so")
+
+# Director restarts between a write and its read back: the check follows after the restart
+bird = DoorBird(one_http_per_input=True, keep="last")
+d = Driver(bird, props=PROPS)
+bird.clock = d.now
+d.async_http()
+d.call("OnDriverInit", "DIT_ADDING")
+d.call("OnDriverLateInit", "DIT_ADDING")
+run_until_post(d, '"input":"doorbell"')
+bird.up = False
+settle(d, 20)
+check(d.eval("next(gReg.unchecked) ~= nil") is True, "a write without its read back is remembered (saved)")
+bird.up = True
+d2 = Driver(bird, props=PROPS, persist=d.persisted())
+bird.clock = d2.now
+d2.start(dit="DIT_STARTUP")
+for _ in range(4):
+    d2.pump()
+check(bird.others_unchanged(d2.token())[0] and d2.eval("next(gReg.unchecked) == nil") is True, "after the restart it is checked and the other app's call put back")
+
+# The Address becomes the same DoorBird's name: nothing is removed (the same MAC)
+bird = DoorBird()
+
+
+def by_name(m, u, h, b):
+    from urllib.parse import urlsplit, urlunsplit
+    p = urlsplit(u)
+    if p.hostname == "frontdoor.local":
+        u = urlunsplit((p.scheme, HOST, p.path, p.query, p.fragment))
+    return bird(m, u, h, b)
+
+
+d = Driver(by_name, props=PROPS)
+bird.clock = d.now
+d.start()
+ids = bird.own_favorite_ids(d.token())
+d.g.RESOLVE["frontdoor.local"] = HOST
+n = len(bird.calls)
+d.set_prop("Address", "frontdoor.local")
+for _ in range(6):
+    d.pump()
+check(not [c for c in bird.calls[n:] if c["query"].get("action") == "remove"] and bird.own_favorite_ids(d.token()) == ids,
+      "the same DoorBird under another address: nothing removed, the same favorites")
+
+# A check on its way when the Address changes: no false Offline / Online, no stale answer applied
+a = DoorBird()
+bnew = DoorBird(host="192.168.50.31", favorites="favorites_empty.json", schedule="schedule_empty.json", info="info_d1101v_wifi.json")
+d = Driver(both, props=PROPS)
+a.clock = bnew.clock = d.now
+d.start()
+d.clear()
+d.async_http()
+d.advance(60000)
+d.call("RunRepeatingTimers")
+d.g.Properties["Address"] = "192.168.50.31"
+d.call("OnPropertyChanged", "Address")
+settle(d)
+check(d.events() == [] and d.prop("Status") == "Online - events live" and d.prop("DoorBird").startswith("DoorBird D1101V"),
+      f"a check on its way when the Address changes: no Offline/Online events, the new DoorBird's info ({d.events()}, {d.prop('Status')})")
+check(a.own_favorite_ids(d.token()) == [] and len(bnew.own_favorite_ids(d.token())) == 3, "and the old DoorBird is left clean")
+
+# A new Address while the old DoorBird's relay entry is being created: that entry goes whole
+a = DoorBird()
+bnew = DoorBird(host="192.168.50.31", favorites="favorites_empty.json", schedule="schedule_empty.json", info="info_d1101v_wifi.json")
+d = Driver(both, props=PROPS)
+a.clock = bnew.clock = d.now
+d.async_http()
+d.call("OnDriverInit", "DIT_ADDING")
+d.call("OnDriverLateInit", "DIT_ADDING")
+for _ in range(400):
+    d.pump(5000, 1)
+    if d.eval("#HTTP_QUEUE") > 0:
+        last = d.g.HTTP_LOG[d.eval("#HTTP_LOG")]
+        if last.method == "POST" and '"param":"2"' in (last.body or "") and '"input":"relay"' in (last.body or ""):
+            break
+        d.flush_http()
+d.g.Properties["Address"] = "192.168.50.31"
+d.call("OnPropertyChanged", "Address")
+settle(d)
+check(a.entry("relay", "2") is None and a.own_favorite_ids(d.token()) == [] and a.others_unchanged(d.token())[0],
+      "an entry created as the Address changed is removed whole from the old DoorBird")
+
 finish()

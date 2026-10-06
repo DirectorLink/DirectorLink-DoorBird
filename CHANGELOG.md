@@ -5,7 +5,7 @@ All notable changes to DirectorLink · DoorBird for Control4. Versions follow th
 ## 1.0.0-beta.3 (1000003) - 2026-10-06
 
 - The tile shows the gate opening after a ring. On the real DoorBird a visitor rang and the gate opened 10 seconds later: *Door Opened* fired, but the tile kept showing the ring, which outranked the gate. A ring and the gate opening now replace each other (the newer shows); motion still hides neither.
-- Confirmed on the DoorBird D2101KV with beta.2: rings, motion and the gate opening reach Control4 as *Ring*, *Motion Detected* and *Door Opened*, and the tile shows them.
+- Confirmed on the DoorBird D2101KV: rings, motion and the gate opening reach Control4 as *Ring*, *Motion Detected* and *Door Opened*, the tile shows them (with this fix, the gate after a ring), and a tap on the tile opens the gate (a second tap within 2 seconds sends no second pulse).
 
 ## 1.0.0-beta.2 (1000002) - 2026-10-06
 

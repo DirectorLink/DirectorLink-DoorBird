@@ -10,7 +10,7 @@ Made by [DirectorLink](https://directorlink.io), the open-source management laye
 
 **Download:** [releases](../../releases) · **Help and updates:** [directorlink.io/drivers/doorbird](https://directorlink.io/drivers/doorbird)
 
-> **Beta.** Runs on a real DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion and the gate opening (*Door Opened*) are confirmed in the controller's log. It stays a beta until opening the gate from Control4 and live video are confirmed too. If you try it, please send the log: see [Testing the beta](#testing-the-beta).
+> **Beta.** Runs on a real DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion, the gate opening (*Door Opened*) and opening the gate with a tap on the tile are confirmed in the controller's log. It stays a beta until live video and a Relay Gate Controller bound to the relay are confirmed too. If you try it, please send the log: see [Testing the beta](#testing-the-beta).
 
 ## What you get
 

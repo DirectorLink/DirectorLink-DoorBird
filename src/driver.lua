@@ -479,7 +479,9 @@ end
     the gate (Gate Relay).
 ===============================================================================]]
 local TILE_TEXT = { idle = "DoorBird", ring = "Someone rang", motion = "Motion at the door", open = "Gate opened", offline = "DoorBird offline" }
-local TILE_RANK = { idle = 0, motion = 1, open = 2, ring = 3, offline = 4 }
+-- A ring and the gate opening replace each other (the newer shows: the gate opened for the visitor
+-- who rang); motion hides neither
+local TILE_RANK = { idle = 0, motion = 1, ring = 2, open = 2, offline = 4 }
 
 local function SetTile(state, holdS)
 	-- A short state does not hide a more important one still showing (a ring is not hidden by motion)

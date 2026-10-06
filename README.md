@@ -10,7 +10,7 @@ Made by [DirectorLink](https://directorlink.io), the open-source management laye
 
 **Download:** [releases](../../releases) · **Help and updates:** [directorlink.io/drivers/doorbird](https://directorlink.io/drivers/doorbird)
 
-> **Beta.** Runs on a real DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings and motion are confirmed in the controller's log. It stays a beta until the gate (relays) and live video are confirmed too. If you try it, please send the log: see [Testing the beta](#testing-the-beta).
+> **Beta.** Runs on a real DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion and the gate opening (*Door Opened*) are confirmed in the controller's log. It stays a beta until opening the gate from Control4 and live video are confirmed too. If you try it, please send the log: see [Testing the beta](#testing-the-beta).
 
 ## What you get
 
@@ -228,7 +228,7 @@ python tools/build.py            # -> dist/DirectorLink-DoorBird.c4z, dist/SHA25
 | `tests/` | `harness.py` (Lua 5.1 with a stubbed Control4 API and a virtual clock), `fake_doorbird.py` (a DoorBird, from `fixtures/`), and the tests |
 | `VERSION`, `CHANGELOG.md`, `docs/releases/` | The version, the change log, and the notes for each release |
 
-`build.py` puts the Lua parts together and stamps the version from `VERSION` and the build date into the packaged copy. The driver version Composer compares is major·1000000 + minor·10000 + patch·100 + build, where build is the beta number, or 99 for the release: `1.0.0-beta.2` → `1000002`, `1.0.0` → `1000099`.
+`build.py` puts the Lua parts together and stamps the version from `VERSION` and the build date into the packaged copy. The driver version Composer compares is major·1000000 + minor·10000 + patch·100 + build, where build is the beta number, or 99 for the release: `1.0.0-beta.3` → `1000003`, `1.0.0` → `1000099`.
 
 The tests run the real driver code in Lua 5.1 against `fake_doorbird.py`, which answers with recorded answers in the shape of the DoorBird's (invented values) and keeps its favorites and schedule like a DoorBird, so what the driver writes is read back. They cover info.cgi, the permission checks, registering every event without changing anything else (byte for byte), keypad codes (and that no log or Status shows them), DoorBirds that keep one HTTP call per event (keeping the last or the first), one that changes another app's times, one without relay schedules, schedule answers that are 204, empty or in an unknown form, another app writing between the driver's read and its write, a read back that fails (nothing deleted, and the entry checked later, also after a restart), the address or password changing while requests are on their way, the same DoorBird under another address, an earlier copy's HTTP calls (and a copy still running), the event server (address, token, repeats), the DirectorLink camera agreement, alerts, pictures, the tile (its states, a tap and Gate Relay), relays (a pulse only), the camera page (only with a login that worked; RTSP 554 or 8557), a refused login (one request, also on a new address), the 423 lockout, the pacing (one request per second), leaving the DoorBird (address change, a DoorBird that moved, an old DoorBird that refuses the old login, Remove From DoorBird, the driver deleted), a restart, and that no log line shows the password, the token, a keypad code, an RFID tag number or another app's URL.
 

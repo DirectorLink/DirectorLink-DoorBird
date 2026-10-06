@@ -4,15 +4,21 @@
 
     One DoorBird video door station (DoorBird D10x, D11x, D21x, BirdGuard)
     on Control4, the way Home Assistant's DoorBird integration works with the
-    DoorBird's official LAN API:
-      - info.cgi on connect: model, firmware, MAC, relays (with the relays of
-        paired I/O door controllers);
+    DoorBird's official LAN API. In the project it is two devices:
+      - "DoorBird": a tile (UI button) whose icon shows a ring, motion, the
+        gate opening or the DoorBird offline; a tap opens the gate. It holds
+        the settings and the programming;
+      - "DoorBird Camera": Control4's camera, filled in by the driver, for
+        pictures and video in the Control4 apps and DirectorLink.
+
+    How it talks to the DoorBird:
+      - info.cgi on connect: model, firmware, MAC, relays;
       - events: a small HTTP server on the controller, and an HTTP favorite on
-        the DoorBird for each event (each doorbell button, motion, RFID, each
-        relay), attached to the DoorBird's schedule (registration.lua);
+        the DoorBird for each event (each doorbell button, each keypad code,
+        motion, RFID, each relay), attached to the DoorBird's schedule
+        (registration.lua);
       - pictures: image.cgi live, history.cgi for the last ring and motion;
-      - live video: RTSP H.264 (port 554, or RTSP over HTTP on 8557), MJPEG
-        video.cgi as the fallback, through Control4's camera proxy;
+      - live video: RTSP H.264 on port 554, MJPEG video.cgi as the fallback;
       - open-door.cgi for each relay (a pulse: a relay is never held) and
         light-on.cgi for the IR light.
 
@@ -31,23 +37,29 @@
     Not affiliated with or endorsed by Bird Home Automation. Product names are trademarks of their owners.
 ===============================================================================]]
 
-local CAMERA_PROXY = 5001
+local TILE_PROXY = 5001
+local CAMERA_PROXY = 5002
 LOG_PREFIX = "DoorBird"
 HEALTH_MS = 60000             -- info.cgi once a minute: online or not
 RESYNC_S = 1800               -- the HTTP calls are checked again every 30 minutes
 OFFLINE_AFTER = 2             -- failed checks in a row before the DoorBird counts as offline
 REPEAT_HOLD_S = 5             -- the same event again within this time is a repeat (one press, one ring)
-PICTURE_WAIT_MS = 1500        -- Ring and Alert wait this long for their picture (Picture With Events)
+MOTION_ALERT_HOLD_S = 60      -- after a motion alert, no new one until this long without motion
+PICTURE_WAIT_MS = 1500        -- Ring and Alert wait this long for their picture
 RELAY_SHOWN_CLOSED_MS = 1000  -- a relay connection shows CLOSED this long after a pulse
 RELAY_DEBOUNCE_S = 2          -- a second pulse for the same relay within this time is not sent
+TILE_RING_S, TILE_OPEN_S, TILE_MOTION_S = 30, 10, 15  -- how long the tile shows a ring, the gate opening, motion
 OLD_RETRY_S = 900             -- leaving an old DoorBird that did not answer: tried again this often
 OLD_RETRY_MAX = 96            -- for a day
+OLD_MAX = 3
 EVENT_PORT_BASE = 47300
-BUTTON_EVENT_BASE, RELAY_EVENT_BASE, RELAY_BINDING_BASE = 100, 200, 300
+BUTTON_EVENT_BASE, RELAY_BINDING_BASE = 100, 300
+RTSP_PORT = 554
+RTSP_PORTS = { [554] = true, [8557] = true } -- RTSP, or RTSP over HTTP where 554 is blocked: set on the camera page
 RTSP_PATH = "mpeg/media.amp"
 SNAPSHOT_PATH = "bha-api/image.cgi"
 MJPEG_PATH = "bha-api/video.cgi"
-SAVED_VARS = { "LAST_ALERT", "LAST_RING", "LAST_MOTION", "LAST_DOORBELL", "LAST_RFID", "LAST_RELAY", "LAST_DOOR_OPENED", "LAST_EVENT" }
+SAVED_VARS = { "LAST_ALERT", "LAST_RING", "LAST_MOTION", "LAST_DOORBELL", "LAST_RFID", "LAST_RELAY", "LAST_DOOR_OPENED", "LAST_EVENT", "LAST_KEYPAD_CODE" }
 
 --[[=============================================================================
     State
@@ -61,31 +73,87 @@ gPerm = { operator = nil, watch = nil, history = nil, motion = nil, checkedAt = 
 
 gState = {
 	online = nil, fails = 0, connecting = false, connectAgain = nil, notDoorBird = false, lastError = nil,
-	doorbirdIp = nil, ctrlIp = nil, attention = {}, events = {}, lastSeen = {}, alertEpisodeAt = nil,
+	doorbirdIp = nil, ctrlIp = nil, problems = {}, events = {}, lastSeen = {}, alertEpisodeAt = nil,
 	eventPicture = nil, pictureSeq = 0, relayPulseAt = {}, pageWrittenAt = 0, savedVars = {},
 	lastSyncAt = 0, syncedCtx = "", selfTest = nil, removed = false, startedAt = os.time(),
-	pageFor = nil,  -- the address and login the camera page was last written with (only once it worked)
+	pageFor = nil,       -- the address and login the camera page was last written with (only once it worked)
+	pageMustWrite = false, -- the login changed: the camera page is written (not only compared)
+	tile = nil, cameraId = nil, buttons = {}, codes = {},
 }
 
--- Saved: the event token, the event server's port, the dynamic events and relay connections,
--- the last device info, and an old DoorBird still to leave
+-- Saved: the event token, the event server's port, the per-button events and relay connections, the
+-- last device info, and old DoorBirds still to leave
 gCfg = {
 	token = nil, port = nil,
-	buttons = {},   -- doorbell button -> event id
-	relays = {},    -- relay -> { binding = id, event = id }
-	olds = {},      -- DoorBirds still to leave: { host, user, mac, tries, created = { EntryKey = true } }
+	buttons = {},   -- doorbell button -> event id (only when the DoorBird has more than one button)
+	relays = {},    -- relay -> { binding = id }
+	olds = {},      -- DoorBirds still to leave: { host, user, mac, tries, created, unchecked }
 	oldPass = {},   -- host -> the password that made the HTTP calls there (saved encrypted)
 	paused = false, -- Remove From DoorBird ran: no events until Reconnect
 }
-OLD_MAX = 3
+
+--[[------------------------------------------------------------------ The driver's two devices ]]
+local function MyProxyDevices()
+	local out, seen = {}, {}
+	local function add(v)
+		v = tonumber(v)
+		if v and not seen[v] then
+			seen[v] = true
+			out[#out + 1] = v
+		end
+	end
+	pcall(function()
+		local list = { C4:GetProxyDevicesById(C4:GetDeviceID()) }
+		for _, v in ipairs(list) do
+			if type(v) == "table" then
+				for k, x in pairs(v) do add(tonumber(k) and k or x) end
+			else
+				for id in string.gmatch(tostring(v), "%d+") do add(id) end
+			end
+		end
+	end)
+	if #out == 0 then
+		pcall(function()
+			for id in string.gmatch(tostring(C4:GetProxyDevices() or ""), "%d+") do add(id) end
+		end)
+	end
+	return out
+end
+
+-- The camera device (the camera.c4i proxy of this driver)
+local function CameraDeviceId()
+	if gState.cameraId then return gState.cameraId end
+	local mine = MyProxyDevices()
+	local ok, cams = pcall(function() return C4:GetDevicesByC4iName("camera.c4i") end)
+	if ok and type(cams) == "table" then
+		for _, id in ipairs(mine) do
+			for k, v in pairs(cams) do
+				if tonumber(k) == id or tonumber(v) == id then
+					gState.cameraId = id
+					return id
+				end
+			end
+		end
+	end
+	return mine[2]
+end
+
+local function TileDeviceId()
+	local cam = CameraDeviceId()
+	for _, id in ipairs(MyProxyDevices()) do
+		if id ~= cam then return id end
+	end
+	return nil
+end
 
 local function DoorBirdName()
-	local ok, n = pcall(function() return C4:GetDeviceDisplayName(ProxyId()) end)
+	local ok, n = pcall(function() return C4:GetDeviceDisplayName(TileDeviceId()) end)
 	return (ok and type(n) == "string" and n ~= "") and n or "DoorBird"
 end
 
 local function SetLogPrefix()
-	LOG_PREFIX = "DoorBird '" .. DoorBirdName() .. "'"
+	local name = DoorBirdName()
+	LOG_PREFIX = name == "DoorBird" and "DoorBird" or ("DoorBird '" .. name .. "'")
 end
 
 --[[=============================================================================
@@ -94,7 +162,7 @@ end
 local function SaveCfg()
 	pcall(function()
 		local relays = {}
-		for r, v in pairs(gCfg.relays) do relays[#relays + 1] = { r, v.binding, v.event } end
+		for r, v in pairs(gCfg.relays) do relays[#relays + 1] = { r, v.binding } end
 		local buttons = {}
 		for b, id in pairs(gCfg.buttons) do buttons[#buttons + 1] = { b, id } end
 		local favorites = {}
@@ -139,7 +207,7 @@ local function LoadCfg()
 		if type(s) == "table" then
 			gCfg.port = tonumber(JsonField(s, "port"))
 			for _, r in ipairs(JsonField(s, "relays") or {}) do
-				if type(r) == "table" and r[1] then gCfg.relays[tostring(r[1])] = { binding = tonumber(r[2]), event = tonumber(r[3]) } end
+				if type(r) == "table" and r[1] then gCfg.relays[tostring(r[1])] = { binding = tonumber(r[2]) } end
 			end
 			for _, b in ipairs(JsonField(s, "buttons") or {}) do
 				if type(b) == "table" and b[1] then gCfg.buttons[tostring(b[1])] = tonumber(b[2]) end
@@ -156,7 +224,11 @@ local function LoadCfg()
 				gReg.host = tostring(JsonField(reg, "host") or "")
 				gReg.wrote = JsonField(reg, "wrote") and tostring(JsonField(reg, "wrote")) or nil
 				for _, f in ipairs(JsonField(reg, "favorites") or {}) do
-					if type(f) == "table" and f[1] then gReg.favorites[tostring(f[1])] = tostring(f[2]) end
+					if type(f) == "table" and f[1] then
+						gReg.favorites[tostring(f[1])] = tostring(f[2])
+						local code = string.match(tostring(f[1]), "^keypad:(%d+)$")
+						if code then RegisterCode(code) end
+					end
 				end
 				for _, k in ipairs(JsonField(reg, "created") or {}) do gReg.created[tostring(k)] = true end
 				for _, v in ipairs(JsonField(reg, "skip") or {}) do
@@ -180,7 +252,10 @@ local function LoadCfg()
 			end
 		end
 		local v = JsonDecode(C4:PersistGetValue("DL_VARS") or "")
-		if type(v) == "table" then gState.savedVars = v end
+		if type(v) == "table" then
+			gState.savedVars = v
+			if v.LAST_KEYPAD_CODE then RegisterCode(v.LAST_KEYPAD_CODE) end
+		end
 		local token = C4:PersistGetValue("DL_TOKEN", true)
 		if type(token) == "string" and #token >= 16 then gCfg.token = token end
 		local op = JsonDecode(C4:PersistGetValue("DL_OLD_PASS", true) or "")
@@ -199,9 +274,9 @@ end
 RegistrationSaved = SaveCfg
 
 --[[=============================================================================
-    Dynamic events (one per doorbell button, one per relay) and relay
-    connections (one per relay). Kept in the saved settings and added again at
-    every start with the same ids, so programming and bindings stay.
+    Relay connections (one per relay) and, on a DoorBird with several bell
+    buttons, one Ring event per button. Kept in the saved settings and added
+    again at every start with the same ids, so bindings and programming stay.
 ===============================================================================]]
 local gBindingsAdded, gEventsAdded = {}, {}
 
@@ -221,8 +296,7 @@ local function AddDynamicEvent(id, name, description)
 	if ok then gEventsAdded[id] = name else LogError("Adding the event '%s' failed: %s", name, err) end
 end
 
-local function ButtonEventName(b) return "Doorbell Pressed (Button " .. b .. ")" end
-local function RelayEventName(r) return "Door Opened (" .. RelayLabel(r) .. ")" end
+local function ButtonEventName(b) return "Ring (Button " .. b .. ")" end
 
 local function NextFree(base, used)
 	local id = base + 1
@@ -245,7 +319,6 @@ end
 local function RestoreDynamicEvents()
 	for b, id in pairs(gCfg.buttons) do AddDynamicEvent(id, ButtonEventName(b), "When doorbell button " .. b .. " of NAME is pressed") end
 	for r, v in pairs(gCfg.relays) do
-		if v.event then AddDynamicEvent(v.event, RelayEventName(r), "When relay " .. r .. " of NAME opens the door or gate") end
 		if v.binding then AddRelayBinding(r, v.binding) end
 	end
 end
@@ -263,16 +336,14 @@ end
 
 local function EnsureRelay(r)
 	if gCfg.relays[r] then return false end
-	local usedB, usedE = {}, {}
+	local used = {}
 	for _, v in pairs(gCfg.relays) do
-		if v.binding then usedB[v.binding] = true end
-		if v.event then usedE[v.event] = true end
+		if v.binding then used[v.binding] = true end
 	end
-	local v = { binding = NextFree(RELAY_BINDING_BASE, usedB), event = NextFree(RELAY_EVENT_BASE, usedE) }
+	local v = { binding = NextFree(RELAY_BINDING_BASE, used) }
 	gCfg.relays[r] = v
 	AddRelayBinding(r, v.binding)
-	AddDynamicEvent(v.event, RelayEventName(r), "When relay " .. r .. " of NAME opens the door or gate")
-	LogInfo("Relay %s: connection '%s' and programming event '%s'", r, RelayLabel(r), RelayEventName(r))
+	LogInfo("Relay %s: connection '%s'", r, RelayLabel(r))
 	return true
 end
 
@@ -284,33 +355,23 @@ local function RelayOfBinding(binding)
 end
 
 --[[=============================================================================
-    Status and attention
+    Status: one line, what the driver does and the first thing to fix. All
+    problems are in Print Diagnostics.
 ===============================================================================]]
-local SyncEvents, Connect, UpdateEventsProperty, KeepOld, LeaveAfterInfo -- forward
+local SyncEvents, Connect, UpdateEventProblems, KeepOld, LeaveAfterInfo -- forward
 
-local ATTENTION_ORDER = { "login", "address", "operator", "watch", "history", "firmware", "events", "server", "proxy", "old" }
+local PROBLEM_ORDER = { "login", "address", "operator", "watch", "firmware", "events", "server", "proxy", "old" }
 
-local function SetAttention(key, text, force)
-	if gState.attention[key] == text and not force then return end
-	gState.attention[key] = text
+function ProblemsText()
 	local items = {}
-	for _, k in ipairs(ATTENTION_ORDER) do
-		if gState.attention[k] then items[#items + 1] = gState.attention[k] end
+	for _, k in ipairs(PROBLEM_ORDER) do
+		if gState.problems[k] then items[#items + 1] = gState.problems[k] end
 	end
-	UpdateProperty("Attention", table.concat(items, "  |  "))
-	pcall(function() C4:SetPropertyAttribs("Attention", #items > 0 and 0 or 1) end)
+	return table.concat(items, "  |  ")
 end
 
 local function Configured()
 	return TargetReady(gBird)
-end
-
-local function SetOnline(on)
-	if gState.online == on then return end
-	local prev = gState.online
-	gState.online = on
-	SetVar("ONLINE", on == true)
-	if prev ~= nil and on ~= nil then FireEvent(on and "DoorBird Online" or "DoorBird Offline") end
 end
 
 function UpdateStatus()
@@ -330,7 +391,7 @@ function UpdateStatus()
 	elseif gState.online == nil then
 		s = "Connecting to " .. host .. "..."
 	elseif gPerm.operator == false then
-		s = "Online, but no events: the DoorBird user '" .. gBird.user .. "' lacks the API-Operator permission"
+		s = "Online, but no events: give the DoorBird user '" .. gBird.user .. "' the API-Operator permission (DoorBird app: Administration, Users)"
 	elseif gCfg.paused then
 		s = "Online - events off: removed from the DoorBird (run Reconnect to register them again)"
 	elseif FirmwareNumber(gInfo.firmware) > 0 and FirmwareNumber(gInfo.firmware) < 110 then
@@ -338,76 +399,128 @@ function UpdateStatus()
 	elseif gReg.state == "ok" then
 		s = "Online - events live"
 	elseif gReg.state == "partial" then
-		s = "Online - some events not registered (see Attention)"
+		s = "Online - some events not registered"
 	elseif gReg.state == "working" or gReg.state == "idle" then
 		s = "Online - setting up events..."
 	else
 		s = "Online - events not registered: " .. tostring(gReg.summary ~= "" and gReg.summary or gReg.lastError or "?")
 	end
-	UpdateProperty("Status", s)
+	-- The first problem the line above does not already say
+	if gState.online == true and not gBird.authFailed then
+		local first, more = nil, 0
+		for _, k in ipairs(PROBLEM_ORDER) do
+			if gState.problems[k] and k ~= "login" and not (k == "operator" and gPerm.operator == false) and k ~= "firmware" then
+				if first then more = more + 1 else first = gState.problems[k] end
+			end
+		end
+		if first then s = s .. ". " .. first .. (more > 0 and (" (and " .. more .. " more: Print Diagnostics)") or "") end
+	end
+	UpdateProperty("Status", Redact(s))
+end
+
+local function SetProblem(key, text)
+	if gState.problems[key] == text then return end
+	gState.problems[key] = text
+	UpdateStatus()
 end
 
 local function PermText(v, missing)
 	if v == true then return "yes" end
 	if v == false then return "NO (" .. missing .. ")" end
-	if v == "empty" then return "yes, no picture yet" end
+	if v == "empty" then return "yes, no picture stored yet" end
 	return "?"
 end
 
+local function PermissionsText()
+	return "API-Operator: " .. PermText(gPerm.operator, "no events")
+		.. ", Watch Always: " .. PermText(gPerm.watch, "no live video")
+		.. ", History: " .. PermText(gPerm.history, "no ring pictures")
+		.. ", Motion: " .. PermText(gPerm.motion, "no motion pictures")
+end
+
 local function UpdatePermissions()
-	UpdateProperty("Permissions", "API-Operator: " .. PermText(gPerm.operator, "no events")
-		.. " · Watch Always: " .. PermText(gPerm.watch, "no live video")
-		.. " · History: " .. PermText(gPerm.history, "no ring pictures")
-		.. " · Motion: " .. PermText(gPerm.motion, "no motion pictures"))
 	local user = "'" .. gBird.user .. "'"
-	SetAttention("operator", gPerm.operator == false and ("Give the DoorBird user " .. user
-		.. " the API-Operator permission (DoorBird app: Administration, Users): without it the driver cannot register events") or nil)
+	SetProblem("operator", gPerm.operator == false and ("The DoorBird user " .. user .. " lacks API-Operator: no events") or nil)
 	local missing = {}
-	if gPerm.watch == false then missing[#missing + 1] = "Watch Always (live video, pictures, opening the door at any time)" end
+	if gPerm.watch == false then missing[#missing + 1] = "Watch Always (live video, pictures, opening the gate at any time)" end
 	if gPerm.history == false then missing[#missing + 1] = "History (ring pictures)" end
 	if gPerm.motion == false then missing[#missing + 1] = "Motion (motion pictures)" end
-	SetAttention("watch", #missing > 0 and ("The DoorBird user " .. user .. " also needs: " .. table.concat(missing, ", ")) or nil)
+	SetProblem("watch", #missing > 0 and ("The DoorBird user " .. user .. " also needs: " .. table.concat(missing, ", ")) or nil)
 	UpdateStatus()
+end
+
+local function MacText()
+	local mac = gInfo.mac
+	if #mac == 12 and not string.find(mac, ":", 1, true) then mac = string.gsub(mac, "(%x%x)", "%1:"):sub(1, 17) end
+	return mac
 end
 
 local function UpdateDeviceProperties()
 	local parts = {}
 	if gInfo.model ~= "" then parts[#parts + 1] = gInfo.model end
-	if gInfo.firmware ~= "" then parts[#parts + 1] = "firmware " .. gInfo.firmware .. (gInfo.build ~= "" and (" (build " .. gInfo.build .. ")") or "") end
-	UpdateProperty("DoorBird", #parts > 0 and table.concat(parts, " - ") or "")
-	local mac = gInfo.mac
-	if #mac == 12 and not string.find(mac, ":", 1, true) then mac = string.gsub(mac, "(%x%x)", "%1:"):sub(1, 17) end
-	UpdateProperty("MAC Address", mac)
-	local own, peri = {}, {}
+	if gInfo.firmware ~= "" then parts[#parts + 1] = "firmware " .. gInfo.firmware end
+	local own = {}
 	for _, r in ipairs(gInfo.relays) do
-		if IsPeripheralRelay(r) then peri[#peri + 1] = r else own[#own + 1] = r end
+		if not IsPeripheralRelay(r) then own[#own + 1] = r end
 	end
-	local text = #own > 0 and table.concat(own, ", ") or (#gInfo.relays == 0 and "" or "none")
-	if #peri > 0 then text = text .. (text ~= "" and " · " or "") .. "door controllers: " .. table.concat(peri, ", ") end
-	UpdateProperty("Relays", text)
+	if #own > 0 then parts[#parts + 1] = (#own == 1 and "relay " or "relays ") .. table.concat(own, ", ") end
+	UpdateProperty("DoorBird", table.concat(parts, " · "))
 	local fw = FirmwareNumber(gInfo.firmware)
-	SetAttention("firmware", (fw > 0 and fw < 110) and ("Firmware " .. gInfo.firmware .. " is too old for events and schedules: update the DoorBird (000110 or newer)") or nil)
+	SetProblem("firmware", (fw > 0 and fw < 110) and ("Firmware " .. gInfo.firmware .. " is too old for events: update the DoorBird (000110 or newer)") or nil)
 end
 
 local function RememberEvent(what)
 	table.insert(gState.events, 1, os.date("%Y-%m-%d %H:%M:%S") .. " " .. what)
 	while #gState.events > 10 do table.remove(gState.events) end
-	UpdateProperty("Last Event", os.date("%H:%M:%S") .. " " .. what)
 end
 
 --[[=============================================================================
-    The Control4 camera page (camera proxy)
-    Address, HTTP port 80, RTSP port 554 (or 8557), Basic login of the
-    DoorBird user: Control4 apps and DirectorLink take pictures and video from
-    exactly these values. The driver's Address, Username and Password are the
-    place to edit; edits on the camera page are put back.
+    The tile (UI button): its icon shows the DoorBird's state; a tap opens
+    the gate (Gate Relay).
 ===============================================================================]]
-local function RtspPort()
-	return string.find(Properties["Live Video"] or "", "8557", 1, true) and 8557 or 554
+local TILE_TEXT = { idle = "DoorBird", ring = "Someone rang", motion = "Motion at the door", open = "Gate opened", offline = "DoorBird offline" }
+local TILE_RANK = { idle = 0, motion = 1, open = 2, ring = 3, offline = 4 }
+
+local function SetTile(state, holdS)
+	-- A short state does not hide a more important one still showing (a ring is not hidden by motion)
+	if holdS and gState.tile and TimerActive("TILE_BACK") and (TILE_RANK[gState.tile] or 0) > (TILE_RANK[state] or 0) then return end
+	if state ~= "offline" and gState.online == false then state = "offline" end
+	gState.tile = state
+	pcall(function() C4:SendToProxy(TILE_PROXY, "ICON_CHANGED", { icon = state, icon_description = TILE_TEXT[state] or state }, "NOTIFY") end)
+	KillTimer("TILE_BACK")
+	if holdS then
+		SetTimer("TILE_BACK", holdS * 1000, function()
+			gState.tile = nil
+			SetTile(gState.online == false and "offline" or "idle")
+		end)
+	end
 end
 
+local function SetOnline(on)
+	if gState.online == on then return end
+	local prev = gState.online
+	gState.online = on
+	SetVar("ONLINE", on == true)
+	if on == false then SetTile("offline") elseif on == true and gState.tile == "offline" then SetTile("idle") end
+	if prev ~= nil and on ~= nil then FireEvent(on and "DoorBird Online" or "DoorBird Offline") end
+end
+
+-- The relay a tap on the tile (and Open Gate) opens; nil for Nothing
+local function GateRelay()
+	local v = Properties["Gate Relay"] or "Relay 1"
+	return string.match(v, "^Relay (.+)$")
+end
+
+--[[=============================================================================
+    The camera device (camera proxy)
+    Address, HTTP port 80, RTSP port 554, Basic login of the DoorBird user:
+    Control4 apps and DirectorLink take pictures and video from exactly these
+    values. The driver's Address, Username and Password are the place to
+    edit; edits on the camera page are put back, except RTSP Port 8557 (RTSP
+    over HTTP, for networks where 554 is blocked), which is kept.
+===============================================================================]]
 local function ReadProxyProperties()
-	local pid = ProxyId()
+	local pid = CameraDeviceId()
 	if not pid then return nil end
 	local ok, xml = pcall(function() return C4:SendUIRequest(pid, "GET_PROPERTIES", {}) end)
 	if not ok or type(xml) ~= "string" or not string.find(xml, "<address>", 1, true) then return nil end
@@ -419,29 +532,35 @@ local function ReadProxyProperties()
 end
 
 local function PageMatches(p)
-	return p ~= nil and trim(p.address or "") == gBird.host and p.httpPort == 80 and p.rtspPort == RtspPort()
+	return p ~= nil and trim(p.address or "") == gBird.host and p.httpPort == 80 and RTSP_PORTS[p.rtspPort or 0] == true
 		and string.upper(p.authType or "") == "BASIC" and toboolean(p.authRequired)
 		and (p.username == nil or p.username == "" or IsMasked(p.username) or p.username == gBird.user)
 		and not toboolean(p.useHttps)
 end
 
+local function LoginKey()
+	return gBird.host .. "\n" .. gBird.user .. "\n" .. gBird.pass
+end
+
 -- Written only with a login the DoorBird took: Control4 apps and DirectorLink use the page, and a wrong
 -- password there would make the DoorBird block their addresses (the controller's among them)
 local function WriteProxySettings(reason)
-	local pid = ProxyId()
+	local pid = CameraDeviceId()
 	if not pid or not Configured() then return end
 	if not gBird.verified then
 		LogDebug("Camera page: waiting until the DoorBird takes this login (%s)", reason or "")
 		return
 	end
-	gState.pageFor = gBird.host .. "\n" .. gBird.user .. "\n" .. gBird.pass
+	gState.pageFor, gState.pageMustWrite = LoginKey(), false
+	local page = ReadProxyProperties()
+	local rtsp = tostring(page and RTSP_PORTS[page.rtspPort or 0] and page.rtspPort or RTSP_PORT)
 	local function cmd(c, p) pcall(function() C4:SendToDevice(pid, c, p, true, false) end) end
 	local function notify(c, p) pcall(function() C4:SendToProxy(CAMERA_PROXY, c, p, "NOTIFY") end) end
-	LogInfo("Writing the camera page: %s, RTSP port %d, Basic login of '%s' (%s)", gBird.host, RtspPort(), gBird.user, reason or "settings")
+	LogInfo("Writing the camera page: %s, Basic login of '%s' (%s)", gBird.host, gBird.user, reason or "settings")
 	gState.pageWrittenAt = os.time()
 	cmd("SET_ADDRESS", { ADDRESS = gBird.host })
 	cmd("SET_HTTP_PORT", { PORT = "80" })
-	cmd("SET_RTSP_PORT", { PORT = tostring(RtspPort()) })
+	cmd("SET_RTSP_PORT", { PORT = rtsp })
 	cmd("SET_USE_HTTPS", { USE_HTTPS = "False" })
 	cmd("SET_AUTHENTICATION_REQUIRED", { REQUIRED = "True" })
 	cmd("SET_AUTHENTICATION_TYPE", { TYPE = "BASIC" })
@@ -449,28 +568,34 @@ local function WriteProxySettings(reason)
 	cmd("SET_PASSWORD", { PASSWORD = gBird.pass })
 	notify("ADDRESS_CHANGED", { ADDRESS = gBird.host })
 	notify("HTTP_PORT_CHANGED", { PORT = "80" })
-	notify("RTSP_PORT_CHANGED", { PORT = tostring(RtspPort()) })
+	notify("RTSP_PORT_CHANGED", { PORT = rtsp })
 	notify("USE_HTTPS_CHANGED", { USE_HTTPS = "False" })
 	SetTimer("PROXY_VERIFY", 3000, function()
 		local p = ReadProxyProperties()
 		if not p then return end
 		if PageMatches(p) then
 			LogDebug("Camera page verified: %s:%s, RTSP %s, %s", tostring(p.address), tostring(p.httpPort), tostring(p.rtspPort), tostring(p.authType))
-			SetAttention("proxy", nil)
+			SetProblem("proxy", nil)
 		else
 			LogWarn("Camera page shows address=%s port=%s rtsp=%s auth=%s required=%s", tostring(p.address), tostring(p.httpPort),
 				tostring(p.rtspPort), tostring(p.authType), tostring(p.authRequired))
-			SetAttention("proxy", "Open the camera's Properties page and set Address " .. gBird.host .. ", HTTP Port 80, RTSP Port " .. RtspPort()
+			SetProblem("proxy", "Open the DoorBird Camera's Properties page and set Address " .. gBird.host .. ", HTTP Port 80, RTSP Port 554 (or 8557)"
 				.. ", Authentication Required, type BASIC, and the DoorBird user's login")
 		end
 	end)
 end
 
+-- Once per login: compared with the page (after a restart), written when it differs or the login changed
 local function SyncCameraPage(reason)
 	if not Configured() or not gBird.verified then return end
-	if gState.pageFor ~= (gBird.host .. "\n" .. gBird.user .. "\n" .. gBird.pass) then return WriteProxySettings(reason) end
+	if gState.pageFor == LoginKey() then return end
+	if gState.pageMustWrite then return WriteProxySettings(reason) end
 	local p = ReadProxyProperties()
-	if p and PageMatches(p) then return end
+	if p and PageMatches(p) then
+		gState.pageFor = LoginKey()
+		SetProblem("proxy", nil)
+		return
+	end
 	WriteProxySettings(reason)
 end
 
@@ -505,7 +630,7 @@ local function FireWithPicture(event, historyKind)
 		KillTimer("PICTURE_WAIT_" .. event)
 		FireEvent(event)
 	end
-	if (Properties["Picture With Events"] or "Yes") ~= "Yes" or not Configured() then return fire() end
+	if not Configured() then return fire() end
 	SetTimer("PICTURE_WAIT_" .. event, PICTURE_WAIT_MS, fire)
 	local function got(jpeg, from)
 		if seq ~= gState.pictureSeq then return end
@@ -529,12 +654,7 @@ end
 --[[=============================================================================
     Events from the DoorBird
 ===============================================================================]]
-local function SaveVars()
-	SaveCfg()
-end
-
 local function RecordHistory(what)
-	if (Properties["Record In History"] or "Yes") ~= "Yes" then return end
 	pcall(function() C4:RecordHistory("Info", what, "Cameras", DoorBirdName(), { doorbird = DoorBirdName() }) end)
 end
 
@@ -542,33 +662,42 @@ local function AlertOnMotion()
 	return (Properties["Alert On Motion"] or "Off") == "On"
 end
 
-local function HoldSeconds()
-	return tonumber(Properties["Motion Alert Hold Time (s)"]) or 60
-end
-
 local function Ring(button)
 	button = button ~= "" and button or "1"
-	EnsureButton(button)
 	SetVar("LAST_DOORBELL", button)
 	SetVar("LAST_RING", IsoUtc())       -- DirectorLink reads LAST_RING when "Ring" fires: set it first
 	SetVar("LAST_EVENT", "Doorbell " .. button)
-	SaveVars()
+	SaveCfg()
 	RememberEvent("doorbell button " .. button)
+	SetTile("ring", TILE_RING_S)
 	local id = gCfg.buttons[button]
 	if id then FireEventById(id, ButtonEventName(button)) end
 	FireWithPicture("Ring", "doorbell")
 	RecordHistory("Doorbell pressed" .. (button ~= "1" and (" (button " .. button .. ")") or ""))
 end
 
+-- The code is for programming only (LAST_KEYPAD_CODE): it opens the door, so it is not in Control4
+-- History, LAST_EVENT or a log
+local function KeypadCode(code)
+	RegisterCode(code)
+	SetVar("LAST_KEYPAD_CODE", code)
+	SetVar("LAST_EVENT", "Keypad code")
+	SaveCfg()
+	RememberEvent("keypad code " .. code)
+	FireEvent("Keypad Code Entered")
+	RecordHistory("Keypad code entered")
+end
+
 local function Motion()
 	local now = NowMs() / 1000
 	SetVar("LAST_MOTION", IsoUtc())
 	SetVar("LAST_EVENT", "Motion")
+	SetTile("motion", TILE_MOTION_S)
 	FireEvent("Motion Detected")
 	local alerted = false
 	if AlertOnMotion() then
-		if gState.alertEpisodeAt and now - gState.alertEpisodeAt < HoldSeconds() then
-			LogDebug("Motion within the hold time (%d s) of the last alert: no new alert", HoldSeconds())
+		if gState.alertEpisodeAt and now - gState.alertEpisodeAt < MOTION_ALERT_HOLD_S then
+			LogDebug("Motion within %d s of the last alert: no new alert", MOTION_ALERT_HOLD_S)
 		else
 			alerted = true
 			SetVar("LAST_ALERT", "Motion")   -- DirectorLink reads LAST_ALERT when "Alert" fires: set it first
@@ -577,14 +706,14 @@ local function Motion()
 		end
 		gState.alertEpisodeAt = now
 	end
-	SaveVars()
+	SaveCfg()
 	RememberEvent("motion" .. (alerted and " (alert)" or ""))
 end
 
 local function RfidRead()
 	SetVar("LAST_RFID", IsoUtc())
 	SetVar("LAST_EVENT", "RFID")
-	SaveVars()
+	SaveCfg()
 	RememberEvent("RFID tag")
 	FireEvent("RFID Read")
 end
@@ -604,16 +733,15 @@ local function DoorOpened(relay, source)
 	SetVar("LAST_RELAY", relay)
 	SetVar("LAST_DOOR_OPENED", IsoUtc())
 	SetVar("LAST_EVENT", "Door opened (relay " .. relay .. ")")
-	SaveVars()
+	SaveCfg()
 	RememberEvent("door opened, relay " .. relay .. " (" .. source .. ")")
 	ShowPulse(relay)
-	local v = gCfg.relays[relay]
-	if v and v.event then FireEventById(v.event, RelayEventName(relay)) end
+	SetTile("open", TILE_OPEN_S)
 	FireEvent("Door Opened")
 	RecordHistory("Door opened (relay " .. relay .. ")")
 end
 
-local KNOWN_EVENTS = { doorbell = true, motion = true, rfid = true, relay = true }
+local KNOWN_EVENTS = { doorbell = true, keypad = true, motion = true, rfid = true, relay = true }
 
 -- A repeat of the same event within REPEAT_HOLD_S is one event (one press, one ring)
 local function IsRepeat(key)
@@ -638,7 +766,7 @@ function EventServerDeliver(e, p, ip)
 		LogDebug("Event call '%s' from the DoorBird: not an event this driver knows", e)
 		return
 	end
-	local key = (e == "doorbell" or e == "relay") and (e .. ":" .. p) or e
+	local key = (e == "doorbell" or e == "relay" or e == "keypad") and (e .. ":" .. p) or e
 	if IsRepeat(key) then
 		LogDebug("%s again within %d s: a repeat, ignored", KeyLabel(key), REPEAT_HOLD_S)
 		return
@@ -649,6 +777,7 @@ function EventServerDeliver(e, p, ip)
 		UpdateStatus()
 	end
 	if e == "doorbell" then Ring(p)
+	elseif e == "keypad" then KeypadCode(p)
 	elseif e == "motion" then Motion()
 	elseif e == "rfid" then RfidRead()
 	elseif e == "relay" then DoorOpened(p ~= "" and p or "1", "DoorBird")
@@ -670,7 +799,7 @@ function OpenDoor(relay, source)
 	relay = trim(tostring(relay or ""))
 	if relay == "" then relay = "1" end
 	if not Configured() then
-		LogWarn("Open door (relay %s): the DoorBird is not set up", relay)
+		LogWarn("Open (relay %s): the DoorBird is not set up", relay)
 		return
 	end
 	local now = NowMs() / 1000
@@ -679,7 +808,7 @@ function OpenDoor(relay, source)
 		return
 	end
 	gState.relayPulseAt[relay] = now
-	LogInfo("Opening the door: relay %s (%s)", relay, source or "Control4")
+	LogInfo("Opening: relay %s (%s)", relay, source or "Control4")
 	DoorBirdRequest(gBird, { path = "/bha-api/open-door.cgi?" .. QueryString({ { "r", relay } }), priority = true,
 		label = "open-door.cgi relay " .. relay }, function(code, body, err)
 		if code == 200 and ReturnCodeOk(body) then
@@ -688,7 +817,7 @@ function OpenDoor(relay, source)
 		elseif code == 204 then
 			gPerm.watch = false
 			UpdatePermissions()
-			LogWarn("Relay %s not opened: the DoorBird user lacks Watch Always (it may open the door only within 5 minutes of a ring)", relay)
+			LogWarn("Relay %s not opened: the DoorBird user lacks Watch Always (it may open only within 5 minutes of a ring)", relay)
 		else
 			gState.relayPulseAt[relay] = nil
 			LogWarn("Relay %s not opened: %s", relay, err or (code and ("HTTP " .. code)) or "no answer")
@@ -710,6 +839,15 @@ function LightOn(source)
 			LogWarn("IR light not turned on: %s", err or (code and ("HTTP " .. code)) or "no answer")
 		end
 	end)
+end
+
+local function OpenGate(source)
+	local relay = GateRelay()
+	if not relay then
+		LogInfo("%s: Gate Relay is Nothing, no relay opened", source)
+		return
+	end
+	OpenDoor(relay, source)
 end
 
 --[[=============================================================================
@@ -736,21 +874,25 @@ local function ApplyInfo(info)
 	UpdateDeviceProperties()
 end
 
+-- The buttons and keypad codes the schedule shows: a Ring event per button when there are several
 function RegistrationKeysFound(keys)
-	local buttons, added = {}, false
+	local buttons, codes, added = {}, {}, false
 	for _, k in ipairs(keys) do
 		local kind, p = KeyParts(k)
-		if kind == "doorbell" then
-			buttons[#buttons + 1] = p
-			if EnsureButton(p) then added = true end
+		if kind == "doorbell" then buttons[#buttons + 1] = p end
+		if kind == "keypad" then codes[#codes + 1] = p end
+	end
+	gState.buttons, gState.codes = buttons, codes
+	if #buttons > 1 then
+		for _, b in ipairs(buttons) do
+			if EnsureButton(b) then added = true end
 		end
 	end
-	UpdateProperty("Doorbell Buttons", table.concat(buttons, ", "))
 	if added then SaveCfg() end
 end
 
 function RegistrationChanged()
-	if UpdateEventsProperty then UpdateEventsProperty() end
+	if UpdateEventProblems then UpdateEventProblems() end
 	UpdateStatus()
 end
 
@@ -759,15 +901,14 @@ function RegistrationIdle()
 	if SyncEvents then SyncEvents("deferred") end
 end
 
-UpdateEventsProperty = function()
-	local server
+local function ServerText()
 	if EventServerListening() then
-		server = "server " .. tostring(gState.ctrlIp or ControllerAddress() or "?") .. ":" .. gServer.port
-	else
-		server = "server " .. gServer.state .. (gServer.error and (" (" .. gServer.error .. ")") or "")
+		return "listening on " .. tostring(gState.ctrlIp or ControllerAddress() or "?") .. ":" .. gServer.port
 	end
-	local text = gReg.summary ~= "" and gReg.summary or gReg.state
-	UpdateProperty("Events", text .. " - " .. server)
+	return gServer.state .. (gServer.error and (" (" .. gServer.error .. ")") or "")
+end
+
+UpdateEventProblems = function()
 	local problems = {}
 	for _, k in ipairs(gReg.keys or {}) do
 		if gReg.problems[k] then problems[#problems + 1] = KeyLabel(k) .. ": " .. gReg.problems[k] end
@@ -775,8 +916,8 @@ UpdateEventsProperty = function()
 	if gReg.state == "failed" and gReg.lastError and #problems == 0 and gPerm.operator ~= false then
 		problems[#problems + 1] = gReg.lastError
 	end
-	SetAttention("events", #problems > 0 and ("Events - " .. table.concat(problems, "; ")) or nil)
-	SetAttention("server", (gServer.state == "error") and ("The event server cannot listen on the controller (" .. tostring(gServer.error) .. ")") or nil)
+	SetProblem("events", #problems > 0 and ("Events - " .. table.concat(problems, "; ")) or nil)
+	SetProblem("server", (gServer.state == "error") and ("The event server cannot listen on the controller (" .. tostring(gServer.error) .. ")") or nil)
 end
 
 local function SyncContext()
@@ -808,7 +949,7 @@ SyncEvents = function(reason)
 			gPerm.operator = true
 		end
 		UpdatePermissions()
-		UpdateEventsProperty()
+		UpdateEventProblems()
 	end)
 end
 
@@ -833,7 +974,7 @@ end
 local function ResolveDoorBird()
 	if IsIPv4(gBird.host) or not ValidAddress(gBird.host) then
 		gState.doorbirdIp = IsIPv4(gBird.host) and gBird.host or nil
-		SetAttention("address", nil)
+		SetProblem("address", nil)
 		return
 	end
 	local host = gBird.host
@@ -849,7 +990,7 @@ local function ResolveDoorBird()
 				if host == gBird.host then
 					gState.doorbirdIp = ip
 					LogInfo("The DoorBird %s is at %s", host, tostring(ip))
-					SetAttention("address", ip and nil or ("The address " .. host .. " does not resolve to an IPv4 address: enter the DoorBird's IP address"))
+					SetProblem("address", ip and nil or ("The address " .. host .. " does not resolve to an IPv4 address: enter the DoorBird's IP address"))
 				end
 				return 0 -- only the address was wanted: no connection
 			end)
@@ -859,7 +1000,7 @@ local function ResolveDoorBird()
 	end)
 	if not ok then
 		LogWarn("Cannot resolve %s: %s", host, tostring(err))
-		SetAttention("address", "Enter the DoorBird's IP address as Address (" .. host .. " cannot be resolved)")
+		SetProblem("address", "Enter the DoorBird's IP address as Address (" .. host .. " cannot be resolved)")
 	end
 end
 
@@ -875,7 +1016,7 @@ local function OnInfo(code, body, err, reason)
 			return
 		end
 		gState.notDoorBird, gState.lastError, gState.fails = false, nil, 0
-		SetAttention("login", nil)
+		SetProblem("login", nil)
 		SyncCameraPage("the DoorBird took the login")
 		ApplyInfo(info)
 		-- The DoorBird an old address pointed at, now at this one (the same MAC): its HTTP calls stay
@@ -899,7 +1040,7 @@ local function OnInfo(code, body, err, reason)
 	LeaveAfterInfo()
 	if code == 401 then
 		SetOnline(false)
-		SetAttention("login", "The DoorBird refused the login of '" .. gBird.user .. "': check the Username and Password (the user made for Control4 in the DoorBird app)")
+		SetProblem("login", "The DoorBird refused the login of '" .. gBird.user .. "': check the Username and Password (the user made for Control4 in the DoorBird app)")
 	elseif code == 423 then
 		SetTimer("LOCK_WAIT", (API_LOCKOUT_S + 1) * 1000, function() Connect("after the lock") end)
 	else
@@ -968,12 +1109,12 @@ local function DropOld(o)
 	gCfg.oldPass[o.host] = nil
 end
 
-local function UpdateOldAttention()
+local function UpdateOldProblem()
 	local hosts = {}
 	for _, o in ipairs(gCfg.olds) do
 		if (o.tries or 0) > 0 then hosts[#hosts + 1] = o.host end
 	end
-	SetAttention("old", #hosts > 0 and ("This driver's HTTP calls are still on the DoorBird at " .. table.concat(hosts, ", ")
+	SetProblem("old", #hosts > 0 and ("This driver's HTTP calls are still on the DoorBird at " .. table.concat(hosts, ", ")
 		.. ": it tries again every " .. (OLD_RETRY_S / 60) .. " minutes") or nil)
 end
 
@@ -985,7 +1126,7 @@ KeepOld = function(o, why)
 	for k, e in pairs(o.unchecked or {}) do gReg.unchecked[k] = e end
 	DropOld(o)
 	SaveCfg()
-	UpdateOldAttention()
+	UpdateOldProblem()
 end
 
 local function LeaveOldDoorBird()
@@ -1025,7 +1166,7 @@ local function LeaveOldDoorBird()
 				end
 			end
 			SaveCfg()
-			UpdateOldAttention()
+			UpdateOldProblem()
 		end
 		if #gCfg.olds > 0 then
 			if ok or not still then LeaveOldDoorBird() else SetTimer("OLD_RETRY", OLD_RETRY_S * 1000, LeaveOldDoorBird) end
@@ -1089,6 +1230,7 @@ local function ApplyLogin()
 	-- Nothing is on its way now; what waits in the queue (made for the old login) is cancelled
 	SetTargetLogin(gBird, host, user, pass)
 	gState.connecting, gState.connectAgain = false, nil
+	gState.pageMustWrite = true
 	if host ~= oldHost then
 		gInfo = { model = "", firmware = "", build = "", mac = "", relays = gInfo.relays, at = nil }
 		gPerm = { operator = nil, watch = nil, history = nil, motion = nil, checkedAt = nil }
@@ -1099,7 +1241,7 @@ local function ApplyLogin()
 	end
 	SaveCfg()
 	LogInfo("DoorBird login: %s, user '%s'", host ~= "" and host or "(no address)", user)
-	SetAttention("login", nil)
+	SetProblem("login", nil)
 	UpdatePermissions()
 	gState.leaveAfterInfo = #gCfg.olds > 0
 	Connect("login changed")
@@ -1139,23 +1281,27 @@ end
 local function PrintDiagnostics()
 	local function render(selfTest)
 		local v = ControllerVersion()
+		local build = ""
+		pcall(function() build = tostring(C4:GetDriverConfigInfo("version") or "") end)
 		local lines = {
 			"===== DirectorLink · DoorBird - diagnostics =====",
-			"Driver        : " .. DRIVER_SEMVER .. " on Control4 OS " .. (v and v.text or "?") .. ", device " .. tostring(MyDeviceId()),
+			"Driver        : " .. DRIVER_SEMVER .. (build ~= "" and (" (" .. build .. ")") or "") .. " on Control4 OS " .. (v and v.text or "?")
+				.. ", device " .. tostring(MyDeviceId()) .. ", tile " .. tostring(TileDeviceId()) .. ", camera " .. tostring(CameraDeviceId()),
 			"Status        : " .. tostring(Properties["Status"]),
 			"DoorBird      : " .. (gBird.host ~= "" and gBird.host or "(no address)") .. (EventServerSource() and EventServerSource() ~= gBird.host and (" = " .. EventServerSource()) or "")
 				.. ", user '" .. gBird.user .. "', password " .. (gBird.pass ~= "" and "set" or "NOT SET")
 				.. (gBird.authFailed and " - LOGIN REFUSED" or "") .. (NowMs() < gBird.lockedUntil and " - BLOCKED FOR A MINUTE" or ""),
 			"Device        : " .. (gInfo.model ~= "" and gInfo.model or "model ?") .. ", firmware " .. (gInfo.firmware ~= "" and gInfo.firmware or "?")
-				.. (gInfo.build ~= "" and (" (build " .. gInfo.build .. ")") or "") .. ", MAC " .. (gInfo.mac ~= "" and gInfo.mac or "?"),
-			"Relays        : " .. (#gInfo.relays > 0 and table.concat(gInfo.relays, ", ") or "none reported"),
-			"Permissions   : " .. tostring(Properties["Permissions"]),
+				.. (gInfo.build ~= "" and (" (build " .. gInfo.build .. ")") or "") .. ", MAC " .. (gInfo.mac ~= "" and MacText() or "?"),
+			"Relays        : " .. (#gInfo.relays > 0 and table.concat(gInfo.relays, ", ") or "none reported") .. " - Gate Relay: " .. tostring(Properties["Gate Relay"]),
+			"Buttons, codes: buttons " .. (#gState.buttons > 0 and table.concat(gState.buttons, ", ") or "?")
+				.. ", keypad codes " .. (#gState.codes > 0 and table.concat(gState.codes, ", ") or "none"),
+			"Permissions   : " .. PermissionsText(),
 			"Online        : " .. tostring(gState.online) .. (gState.lastError and (" (last error: " .. gState.lastError .. ")") or ""),
 		}
-		local srv = EventServerListening() and ("listening on " .. tostring(ControllerAddress()) .. ":" .. gServer.port) or ("not listening: " .. gServer.state .. " " .. tostring(gServer.error or ""))
-		lines[#lines + 1] = "Event server  : " .. srv .. " - self-test " .. tostring(selfTest) .. " - " .. gServer.accepted .. " calls taken, " .. gServer.refused .. " refused"
+		lines[#lines + 1] = "Event server  : " .. ServerText() .. " - self-test " .. tostring(selfTest) .. " - " .. gServer.accepted .. " calls taken, " .. gServer.refused .. " refused"
 			.. (gServer.lastRefused and (" (last refused " .. os.date("%H:%M:%S", gServer.lastRefused.at) .. " from " .. gServer.lastRefused.ip .. ": " .. gServer.lastRefused.why .. ")") or "")
-		lines[#lines + 1] = "Events        : " .. tostring(Properties["Events"])
+		lines[#lines + 1] = "Events        : " .. (gReg.summary ~= "" and gReg.summary or gReg.state)
 		-- This driver's favorites, then a count of the others (their URLs may hold logins: not shown)
 		local own, others, ids = {}, {}, {}
 		for id, f in pairs(gReg.favs or {}) do
@@ -1185,7 +1331,9 @@ local function PrintDiagnostics()
 			if mine then
 				m = m + 1
 				local ck = EntryKey(EntryInput(e), EntryParam(e))
-				lines[#lines + 1] = "   " .. EntryLabel(EntryInput(e), EntryParam(e)) .. ": " .. table.concat(outs, ", ") .. (gReg.created[ck] and "  [entry made by this driver]" or "")
+				local label = EntryLabel(EntryInput(e), EntryParam(e))
+				if EntryInput(e) == "doorbell" and IsKeypadCode(EntryParam(e)) then label = "keypad code " .. EntryParam(e) end
+				lines[#lines + 1] = "   " .. label .. ": " .. table.concat(outs, ", ") .. (gReg.created[ck] and "  [entry made by this driver]" or "")
 			end
 		end
 		if m == 0 then lines[#lines + 1] = "   none" end
@@ -1200,16 +1348,17 @@ local function PrintDiagnostics()
 		end
 		local p = ReadProxyProperties()
 		lines[#lines + 1] = "Camera page   : " .. (p and (tostring(p.address) .. ":" .. tostring(p.httpPort) .. ", RTSP " .. tostring(p.rtspPort) .. ", auth " .. tostring(p.authType)
-			.. " required " .. tostring(p.authRequired) .. (PageMatches(p) and " (as it should be)" or " (DIFFERS - see Attention)")) or "cannot be read")
-		lines[#lines + 1] = "Video         : rtsp://" .. gBird.host .. ":" .. RtspPort() .. "/" .. RTSP_PATH .. " (H.264), MJPEG http://" .. gBird.host .. "/" .. MJPEG_PATH
+			.. " required " .. tostring(p.authRequired) .. (PageMatches(p) and " (as it should be)" or " (DIFFERS)")) or "cannot be read")
+		lines[#lines + 1] = "Video         : rtsp://" .. gBird.host .. ":" .. tostring(p and RTSP_PORTS[p.rtspPort or 0] and p.rtspPort or RTSP_PORT) .. "/" .. RTSP_PATH .. " (H.264), MJPEG http://" .. gBird.host .. "/" .. MJPEG_PATH
 			.. ", snapshot http://" .. gBird.host .. "/" .. SNAPSHOT_PATH
 		lines[#lines + 1] = "Variables     : DIRECTORLINK_CAMERA=" .. tostring(GetVar("DIRECTORLINK_CAMERA")) .. " KIND=" .. tostring(GetVar("DIRECTORLINK_CAMERA_KIND"))
-			.. " LAST_RING=" .. tostring(GetVar("LAST_RING")) .. " LAST_ALERT=" .. tostring(GetVar("LAST_ALERT")) .. " LAST_MOTION=" .. tostring(GetVar("LAST_MOTION"))
-		lines[#lines + 1] = "Alerts        : Alert On Motion " .. tostring(Properties["Alert On Motion"]) .. ", hold " .. HoldSeconds() .. " s"
+			.. " LAST_RING=" .. tostring(GetVar("LAST_RING")) .. " LAST_ALERT=" .. tostring(GetVar("LAST_ALERT"))
+		lines[#lines + 1] = "Alerts        : Alert On Motion " .. tostring(Properties["Alert On Motion"]) .. ", once per " .. MOTION_ALERT_HOLD_S .. " s without motion"
 		for _, o in ipairs(gCfg.olds) do
 			lines[#lines + 1] = "Old DoorBird  : " .. o.host .. " still has this driver's HTTP calls (tried " .. tostring(o.tries) .. " times)"
 		end
-		if (Properties["Attention"] or "") ~= "" then lines[#lines + 1] = "ATTENTION     : " .. Properties["Attention"] end
+		local problems = ProblemsText()
+		lines[#lines + 1] = "To fix        : " .. (problems ~= "" and problems or "nothing")
 		lines[#lines + 1] = "================================================="
 		PrintReport(lines)
 	end
@@ -1243,6 +1392,7 @@ local function TestPictures()
 			local w, h = JpegSize(jpeg)
 			return string.format("Test Pictures %s: OK in %d ms - %sx%s, %s", what, ms or 0, tostring(w or "?"), tostring(h or "?"), ByteSize(#jpeg))
 		end
+		if code == 404 then return "Test Pictures " .. what .. ": no picture stored yet (HTTP 404)" end
 		local why = err or ("HTTP " .. tostring(code))
 		if code == 204 then why = "204 - the DoorBird user lacks the permission (" .. (what == "live" and "Watch Always" or (what == "last ring" and "History" or "Motion")) .. ")" end
 		return "Test Pictures " .. what .. ": FAILED - " .. why
@@ -1267,7 +1417,7 @@ local function RemoveFromDoorBird()
 		SaveCfg()
 		gReg.state, gReg.summary = ok and "removed" or "failed", ok and ("removed from the DoorBird (" .. count .. " HTTP calls) - Reconnect registers them again") or tostring(err)
 		PrintReport({ "Remove From DoorBird: " .. (ok and ("OK, " .. count .. " HTTP call" .. (count == 1 and "" or "s") .. " removed. Run Reconnect to register them again.") or ("FAILED - " .. tostring(err))) })
-		UpdateEventsProperty()
+		UpdateEventProblems()
 		UpdateStatus()
 	end, "Remove From DoorBird")
 end
@@ -1286,10 +1436,10 @@ local ACTIONS = {
 		SetTargetAuthFailed(gBird, false)
 		gBird.lockedUntil = 0
 		gPerm.checkedAt = nil
-		gState.pageFor = nil
+		gState.pageFor, gState.pageMustWrite = nil, true
 		Connect("reconnect")
 	end,
-	OpenDoor = function() OpenDoor("1", "Composer action") end,
+	OpenGate = function() OpenGate("Composer action") end,
 	LightOn = function() LightOn("Composer action") end,
 	RemoveFromDoorBird = RemoveFromDoorBird,
 }
@@ -1301,7 +1451,7 @@ local function SetAlertOnMotion(on)
 end
 
 local COMMANDS = {
-	OPEN_DOOR = function(p) OpenDoor(p["Relay"] or p.RELAY or p.relay or "1", "programming") end,
+	OPEN_DOOR = function(p) OpenDoor(p["Relay"] or p.RELAY or p.relay or GateRelay() or "1", "programming") end,
 	LIGHT_ON = function() LightOn("programming") end,
 	SET_ALERT_ON_MOTION = function(p)
 		local s = string.upper(p["State"] or p.STATE or "TOGGLE")
@@ -1321,7 +1471,10 @@ local function PageEdited(cmd)
 	local login = cmd == "SET_USERNAME" or cmd == "SET_PASSWORD"
 	SetTimer("PAGE_RESTORE", 2000, function()
 		local p = ReadProxyProperties()
-		if p and PageMatches(p) and not login then return end
+		if p and PageMatches(p) and not login then
+			SetProblem("proxy", nil)
+			return
+		end
 		LogInfo("The camera page follows the driver's Address, Username and Password (%s changed): putting it back", cmd)
 		WriteProxySettings("camera page edited")
 	end)
@@ -1343,7 +1496,7 @@ UI_REQ.GET_SNAPSHOT_QUERY_STRING = function(tParams)
 	return "<snapshot_query_string>" .. XmlEscape(SNAPSHOT_PATH) .. "</snapshot_query_string>"
 end
 UI_REQ.GET_RTSP_H264_QUERY_STRING = function(tParams)
-	LogRequest("GET_RTSP_H264_QUERY_STRING", tParams, RTSP_PATH .. " (port " .. RtspPort() .. ")")
+	LogRequest("GET_RTSP_H264_QUERY_STRING", tParams, RTSP_PATH)
 	return "<rtsp_h264_query_string>" .. XmlEscape(RTSP_PATH) .. "</rtsp_h264_query_string>"
 end
 UI_REQ.GET_RTSP_H264_QUERY = UI_REQ.GET_RTSP_H264_QUERY_STRING
@@ -1369,6 +1522,7 @@ local VARIABLES = {
 	{ "LAST_DOOR_OPENED", "", "STRING" },
 	{ "LAST_EVENT", "", "STRING" },
 	{ "ONLINE", "0", "BOOL" },
+	{ "LAST_KEYPAD_CODE", "", "STRING" },
 }
 
 -- Written on every start, so they are right after a driver update too
@@ -1398,7 +1552,7 @@ local function StartEventServer()
 			gCfg.port = gServer.port
 			SaveCfg()
 		end
-		if UpdateEventsProperty then UpdateEventsProperty() end
+		if UpdateEventProblems then UpdateEventProblems() end
 		-- A new port once connected: the HTTP calls must point at it (at startup, Connect registers them)
 		if state == "listening" and gState.online == true then SyncEvents("event server") end
 	end
@@ -1409,10 +1563,6 @@ end
 function OnDriverLateInit(dit)
 	ApplyLogSettings()
 	SetLogPrefix()
-	pcall(function()
-		local build = tostring(C4:GetDriverConfigInfo("version") or "")
-		UpdateProperty("Driver Version", DRIVER_SEMVER ~= "dev" and (DRIVER_SEMVER .. " (" .. build .. ")") or build)
-	end)
 	SetAgreementVariables()
 	SetVar("ONLINE", false)
 	if dit == "DIT_ADDING" or (DIT_ADDING ~= nil and dit == DIT_ADDING) then
@@ -1427,10 +1577,10 @@ function OnDriverLateInit(dit)
 		if v.binding then pcall(function() C4:SendToProxy(v.binding, "STATE_OPENED", {}, "NOTIFY") end) end
 	end
 	gState.ctrlIp = ControllerAddress()
-	SetAttention("proxy", nil, true) -- also hides the empty Attention line
+	SetTile("idle")
 	UpdateDeviceProperties()
 	UpdatePermissions()
-	UpdateEventsProperty()
+	UpdateEventProblems()
 	UpdateStatus()
 	StartEventServer()
 	SetTimer("HEALTH", HEALTH_MS, HealthCheck, true)
@@ -1464,9 +1614,6 @@ function OnPropertyChanged(name)
 	elseif name == "Address" or name == "Username" or name == "Password" then
 		-- Applied once the installer is done typing
 		SetTimer("LOGIN_APPLY", 1500, ApplyLogin)
-	elseif name == "Live Video" then
-		WriteProxySettings("Live Video " .. tostring(Properties["Live Video"]))
-		if not gBird.verified then gState.pageFor = nil end
 	elseif name == "Alert On Motion" then
 		gState.alertEpisodeAt = nil
 	end
@@ -1480,6 +1627,12 @@ function ReceivedFromProxy(idBinding, strCommand, tParams)
 			parts[#parts + 1] = tostring(k) .. "=" .. (string.find(string.upper(tostring(k)), "PASSWORD", 1, true) and "***" or tostring(v))
 		end
 		LogDebug("ReceivedFromProxy(%s, %s, {%s})", idBinding, strCommand, table.concat(parts, ", "))
+	end
+
+	-- The tile: a tap opens the gate
+	if idBinding == TILE_PROXY then
+		if strCommand == "SELECT" then OpenGate("the DoorBird tile") end
+		return
 	end
 
 	-- A relay connection (a Relay Door, Gate or Garage Controller bound to it): a pulse only

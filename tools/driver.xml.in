@@ -28,50 +28,7 @@
 	</proxies>
 
 	<capabilities>
-		<navigator_display_option proxybindingid="5001">
-			<display_icons>
-				<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/idle_70.png</Icon>
-				<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/idle_90.png</Icon>
-				<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/idle_300.png</Icon>
-				<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/idle_512.png</Icon>
-				<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/idle_1024.png</Icon>
-				<state id="idle">
-					<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/idle_70.png</Icon>
-					<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/idle_90.png</Icon>
-					<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/idle_300.png</Icon>
-					<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/idle_512.png</Icon>
-					<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/idle_1024.png</Icon>
-				</state>
-				<state id="ring">
-					<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/ring_70.png</Icon>
-					<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/ring_90.png</Icon>
-					<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/ring_300.png</Icon>
-					<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/ring_512.png</Icon>
-					<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/ring_1024.png</Icon>
-				</state>
-				<state id="motion">
-					<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/motion_70.png</Icon>
-					<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/motion_90.png</Icon>
-					<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/motion_300.png</Icon>
-					<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/motion_512.png</Icon>
-					<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/motion_1024.png</Icon>
-				</state>
-				<state id="open">
-					<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/open_70.png</Icon>
-					<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/open_90.png</Icon>
-					<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/open_300.png</Icon>
-					<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/open_512.png</Icon>
-					<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/open_1024.png</Icon>
-				</state>
-				<state id="offline">
-					<Icon width="70" height="70">controller://driver/DirectorLink-DoorBird/icons/tile/offline_70.png</Icon>
-					<Icon width="90" height="90">controller://driver/DirectorLink-DoorBird/icons/tile/offline_90.png</Icon>
-					<Icon width="300" height="300">controller://driver/DirectorLink-DoorBird/icons/tile/offline_300.png</Icon>
-					<Icon width="512" height="512">controller://driver/DirectorLink-DoorBird/icons/tile/offline_512.png</Icon>
-					<Icon width="1024" height="1024">controller://driver/DirectorLink-DoorBird/icons/tile/offline_1024.png</Icon>
-				</state>
-			</display_icons>
-		</navigator_display_option>
+@@NAVIGATOR_ICONS@@
 		<modes>SNAPSHOT, MJPEG, H264</modes>
 		<has_pan>false</has_pan>
 		<has_tilt>false</has_tilt>

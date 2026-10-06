@@ -111,6 +111,7 @@ local function HandleRequest(client, text)
 	if not source then return Refuse(client, ip, "the DoorBird's address is not known yet") end
 	if ip ~= source then return Refuse(client, ip, "not the DoorBird (" .. source .. ")") end
 	gServer.accepted = gServer.accepted + 1
+	if e == "keypad" then RegisterCode(p) end
 	LogDebug("Event call from the DoorBird (%s): %s%s", ip, e, p ~= "" and (" " .. p) or "")
 	Respond(client, 200, "OK\n")
 	local ok, err = pcall(EventServerDeliver, e, p, ip)
@@ -170,6 +171,35 @@ function EventServerStop()
 end
 
 local Listen -- forward
+
+-- Does anything answer at host:port (another copy of this driver)? done(true) on any HTTP answer,
+-- and on doubt (a timeout); done(false) only when the connection is refused: nothing listens there.
+-- It asks for "/", which a copy answers with 404 without counting a refused call. Without an
+-- answer in EVENT_PROBE_WAIT_MS it counts as doubt: done(true).
+EVENT_PROBE_WAIT_MS = 10000
+
+function EventServerProbe(host, port, done)
+	local called, timer = false, "EVENT_PROBE_" .. tostring(port)
+	local function finish(answers)
+		if called then return end
+		called = true
+		KillTimer(timer)
+		done(answers)
+	end
+	SetTimer(timer, EVENT_PROBE_WAIT_MS, function() finish(true) end)
+	local ok = pcall(function()
+		local x = C4:url()
+		x:SetOptions({ fail_on_error = false, timeout = 5, connect_timeout = 3 })
+		x:OnDone(function(_, responses, errCode, errMsg)
+			local resp = type(responses) == "table" and responses[#responses] or nil
+			if resp and tonumber(resp.code) and tonumber(resp.code) > 0 then return finish(true) end
+			local refused = errCode == 7 or string.find(string.lower(tostring(errMsg or "")), "couldn't connect", 1, true) ~= nil
+			finish(not refused)
+		end)
+		x:Get("http://" .. host .. ":" .. port .. "/", {})
+	end)
+	if not ok then finish(true) end
+end
 
 -- A port in use: the next one (each copy of the driver on a controller needs its own)
 local function NextPort()

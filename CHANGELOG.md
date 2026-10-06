@@ -2,6 +2,17 @@
 
 All notable changes to DirectorLink · DoorBird for Control4. Versions follow the `VERSION` file; the driver version Composer compares is in brackets.
 
+## 1.0.0-beta.2 (1000002) - 2026-10-06
+
+Redesigned after the first run on a real DoorBird D2101KV (firmware 000152), where the login, pictures, registering the events, rings and motion were confirmed. **Not an update for beta.1**: run Remove From DoorBird on beta.1, delete it, then add beta.2 (a beta.1 deleted without it leaves HTTP calls that beta.2 removes).
+
+- **Two devices instead of one camera:** **DoorBird**, a tile for the Control4 apps (the primary device), and **DoorBird Camera**. The tile's icon shows a ring, motion, the gate opening or the DoorBird offline; a tap opens the gate.
+- **Eight properties instead of nineteen:** Status, DoorBird, Address, Username, Password, Gate Relay, Alert On Motion, Log Level. *Gate Relay* (Relay 1, Relay 2 or Nothing) is what a tap on the tile and the new **Open Gate** action open. **Status** now also says the first thing to fix (*Attention* is gone); MAC, permissions, buttons, the event server, this driver's HTTP calls and the last events are in **Print Diagnostics**. Pictures for notifications and Control4 History entries are always on, a motion alert is held for a minute, and RTSP over HTTP is set as RTSP Port 8557 on the camera page (the driver keeps 554 or 8557 there).
+- **Keypad codes:** on a DoorBird with a keypad, each code in the schedule (a `doorbell` entry whose parameter is the code) gets its own HTTP call, next to the code's own relay. **Keypad Code Entered** fires and `LAST_KEYPAD_CODE` holds the code for programming. The code opens a door, so it is masked like the password: never in a log, Status, Print Diagnostics or the Control4 History; RFID tag numbers too. Codes are registered after the other events, so a DoorBird with no room for more favorites keeps the bell, motion, RFID and the relays. (Beta.1 took a code for a doorbell button.)
+- **Fewer, clearer events:** *Ring (Button n)* only on a DoorBird with several buttons (*Doorbell Pressed (Button n)* is gone); one *Door Opened* (`LAST_RELAY` says which relay) instead of one per relay. Event ids are new: programming made on beta.1 must be made again.
+- HTTP calls an earlier copy of the driver left at another port of this controller are removed only when nothing answers at that port (no answer within 10 seconds counts as a copy still running), so a copy still running keeps its own (no tug of war).
+- The camera page is compared once per login instead of read every minute; a camera page fixed by hand clears its warning in Status.
+
 ## 1.0.0-beta.1 (1000001) - 2026-10-05
 
 First release, a **beta**: built on DoorBird's published LAN API (revision 0.36) and the way Home Assistant's DoorBird integration uses it, tested against recorded API answers, not yet confirmed on a real DoorBird.

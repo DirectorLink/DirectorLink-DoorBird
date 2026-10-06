@@ -303,6 +303,24 @@ end
 
 -- The http favorites of favorites.cgi: { [id] = { title, value } }, or nil and why. An empty answer
 -- is no favorites (nothing is ever deleted on the strength of a favorites list alone).
+-- A "doorbell" entry that is a keypad code (4 or more digits, or a leading zero), not a bell button
+function IsKeypadCode(param)
+	param = tostring(param or "")
+	return string.match(param, "^%d%d%d%d+$") ~= nil or string.match(param, "^0%d+$") ~= nil
+end
+
+-- A keypad code in a favorite of this driver or of an earlier copy (its address or its title): never in
+-- a log from here on
+local function RegisterFavoriteCodes(title, value)
+	local q = string.match(value, "^%a+://[^/?#]+/doorbird%?([^#]*)")
+	if q then
+		local e, p = QueryValue(q, "e"), QueryValue(q, "p")
+		if (e == "keypad" or e == "doorbell") and IsKeypadCode(p) then RegisterCode(p) end
+	end
+	local c = string.match(title, "^DirectorLink %(keypad code (%d+)%)$") or string.match(title, "^DirectorLink %(doorbell (%d+)%)$")
+	if c and IsKeypadCode(c) then RegisterCode(c) end
+end
+
 function ParseFavorites(body)
 	if body == nil or trim(body) == "" then return {}, nil, 0 end
 	local doc, err = JsonDecode(body)
@@ -316,6 +334,7 @@ function ParseFavorites(body)
 		for id, f in pairs(http) do
 			if type(f) == "table" then
 				out[tostring(id)] = { title = tostring(JsonField(f, "title") or ""), value = tostring(JsonField(f, "value") or "") }
+				RegisterFavoriteCodes(out[tostring(id)].title, out[tostring(id)].value)
 			end
 		end
 	end
@@ -347,6 +366,9 @@ function ParseSchedule(body)
 		if JsonIsObject(e) and JsonField(e, "input") then
 			local o = JsonField(e, "output")
 			if type(o) ~= "table" or o == JSON_NULL or (next(o) ~= nil and JsonIsObject(o)) then gUnknownEntries[e] = true end
+			-- A keypad code or an RFID tag opens the door: never in a log from here on
+			local input, param = tostring(JsonField(e, "input")), tostring(JsonField(e, "param") or "")
+			if (input == "doorbell" and IsKeypadCode(param)) or input == "rfid" then RegisterCode(param) end
 			out[#out + 1] = e
 		end
 	end

@@ -9,6 +9,7 @@ Remove From DoorBird, the driver deleted), a restart, and that no log line shows
 password, the event token or another app's URL.
 """
 import base64
+import copy
 import re
 
 from harness import Driver, check, finish
@@ -61,18 +62,15 @@ order = list(d.g.VAR_ORDER.values())
 check(order[:4] == ["DIRECTORLINK_CAMERA", "DIRECTORLINK_CAMERA_KIND", "LAST_ALERT", "LAST_RING"], f"variables keep their order ({order[:4]})")
 check(d.server_port() == 47300, f"event server on port 47300 ({d.server_port()})")
 check(bird.requests("/bha-api/info.cgi")[0]["user"] == USER, "info.cgi with the Control4 user's Basic login")
-check(d.prop("DoorBird") == "DoorBird D2101V - firmware 000141 (build 16418935)", f"model and firmware shown ({d.prop('DoorBird')})")
-check(d.prop("MAC Address") == "1C:CA:E3:71:2A:4F", f"MAC shown ({d.prop('MAC Address')})")
-check(d.prop("Relays") == "1, 2 · door controllers: ghchdi@1, ghchdi@2", f"relays shown with the door controller's ({d.prop('Relays')})")
-check(d.prop("Permissions") == "API-Operator: yes · Watch Always: yes · History: yes · Motion: yes", f"permissions checked ({d.prop('Permissions')})")
-check(d.prop("Status") == "Online - events live" and d.prop("Attention") == "", f"Status ({d.prop('Status')}) / Attention ({d.prop('Attention')})")
-check(d.prop("Events") == "registered: doorbell 1, motion, RFID, relay 1, relay 2 - server 192.168.50.10:47300", f"Events ({d.prop('Events')})")
-check(d.prop("Doorbell Buttons") == "1", "doorbell buttons")
+check(d.prop("DoorBird") == "DoorBird D2101V · firmware 000141 · relays 1, 2", f"the DoorBird line: model, firmware, its own relays ({d.prop('DoorBird')})")
+check(all(d.eval(f"gPerm.{k}") is True for k in ("operator", "watch", "history", "motion")), "permissions checked")
+check(d.prop("Status") == "Online - events live" and d.eval("ProblemsText()") == "", f"Status, nothing to fix ({d.prop('Status')})")
+check(d.eval("gReg.summary") == "registered: doorbell 1, motion, RFID, relay 1, relay 2", f"events registered ({d.eval('gReg.summary')})")
 b = d.bindings()
 check({k: v["name"] for k, v in b.items()} == {301: "Relay 1", 302: "Relay 2", 303: "Relay ghchdi@1", 304: "Relay ghchdi@2"}
       and all(v["class"] == "RELAY" and v["kind"] == "CONTROL" and v["provider"] for v in b.values()), "one RELAY connection per DoorBird relay")
-check(d.dyn_events() == {101: "Doorbell Pressed (Button 1)", 201: "Door Opened (Relay 1)", 202: "Door Opened (Relay 2)",
-                         203: "Door Opened (Relay ghchdi@1)", 204: "Door Opened (Relay ghchdi@2)"}, f"programming events per button and relay ({d.dyn_events()})")
+check(d.dyn_events() == {}, f"one bell button: no per-button events (Ring is it), no per-relay events ({d.dyn_events()})")
+check(d.proxy("ICON_CHANGED", 5001) and d.proxy("ICON_CHANGED", 5001)[-1][2]["icon"] == "idle", "the DoorBird tile shows idle")
 
 own = bird.own_favorite_ids(token)
 favs = bird.http_favorites()
@@ -106,6 +104,8 @@ check("GET info.cgi -> 200" in logs and "POST schedule.cgi save doorbell 1 (4 ou
       and "GET favorites.cgi save 'DirectorLink (motion)' (new) -> 200" in logs, "Debug: a line for every request")
 clean, leaks = logs_clean(d)
 check(clean, f"no log line shows the password, the token or another app's URL {leaks}")
+check(not [x for x in d.logs() if "0012345678" in x or "0087654321" in x] and "save RFID *** (2 outputs)" in logs,
+      "nor the RFID tag numbers (a tag can be copied from its number)")
 
 # the camera page
 cmds = {c[1]: c[2] for c in d.device_cmds()}
@@ -114,14 +114,34 @@ check(cmds.get("SET_ADDRESS") == {"ADDRESS": HOST} and cmds.get("SET_HTTP_PORT")
       "camera page: address, HTTP 80, RTSP 554, Basic login required")
 check(cmds.get("SET_USERNAME") == {"USERNAME": USER} and cmds.get("SET_PASSWORD") == {"PASSWORD": PASSWORD}
       and all(c[3] is False for c in d.device_cmds()), "camera page: the Control4 user's login (not logged by Director)")
+check(d.device_cmds() and all(c[0] == 902 for c in d.device_cmds()), "written to the DoorBird Camera device (not the tile)")
 check(d.call("UIRequest", "GET_SNAPSHOT_QUERY_STRING", d.table({"SIZE_X": "320"})) == "<snapshot_query_string>bha-api/image.cgi</snapshot_query_string>", "snapshot: image.cgi")
 check(d.call("UIRequest", "GET_RTSP_H264_QUERY_STRING", d.table({})) == "<rtsp_h264_query_string>mpeg/media.amp</rtsp_h264_query_string>", "live video: RTSP H.264 mpeg/media.amp")
 check(d.call("UIRequest", "GET_MJPEG_QUERY_STRING", d.table({})) == "<mjpeg_query_string>bha-api/video.cgi</mjpeg_query_string>", "fallback: MJPEG video.cgi")
 d.clear()
-d.set_prop("Live Video", "RTSP over HTTP (port 8557)")
-check({c[1]: c[2] for c in d.device_cmds()}.get("SET_RTSP_PORT") == {"PORT": "8557"} and d.proxy("RTSP_PORT_CHANGED")[-1][2] == {"PORT": "8557"},
-      "Live Video: RTSP over HTTP puts port 8557 on the camera page")
-d.set_prop("Live Video", "RTSP (port 554)")
+tick(d)
+check(not [c for c in d.device_cmds()] and d.eval("gState.pageFor ~= nil") is True, "the camera page is not read or written again every minute")
+# RTSP over HTTP: port 8557 set on the camera page is kept (for networks where 554 is blocked)
+page = ("<properties><address>{a}</address><http_port>80</http_port><rtsp_port>{r}</rtsp_port><authentication_required>True</authentication_required>"
+        "<authentication_type>BASIC</authentication_type><username>{u}</username><use_https>False</use_https></properties>")
+d.g.PROXY_PROPS = page.format(a=HOST, r=8557, u=USER)
+d.call("ReceivedFromProxy", 5002, "SET_RTSP_PORT", d.table({"PORT": "8557"}))
+d.advance(12000)
+d.pump()
+check(not d.device_cmds(), "RTSP Port 8557 on the camera page is kept")
+d.g.PROXY_PROPS = page.format(a=HOST, r=1554, u=USER)
+d.eval("(function() gState.pageWrittenAt = 0 end)()")
+d.call("ReceivedFromProxy", 5002, "SET_RTSP_PORT", d.table({"PORT": "1554"}))
+d.advance(3000)
+d.pump()
+check({c[1]: c[2] for c in d.device_cmds()}.get("SET_RTSP_PORT") == {"PORT": "554"}, "another port is put back to 554")
+d.g.PROXY_PROPS = page.format(a=HOST, r=8557, u=USER)
+d.clear()
+d.action("Reconnect")
+for _ in range(3):
+    d.pump()
+check({c[1]: c[2] for c in d.device_cmds()}.get("SET_RTSP_PORT") == {"PORT": "8557"}, "and kept when the page is written again (Reconnect)")
+d.g.PROXY_PROPS = ""
 
 # a later check changes nothing
 before = len(bird.calls)
@@ -135,16 +155,16 @@ check([c["path"] for c in later] == ["/bha-api/info.cgi", "/bha-api/favorites.cg
 d.clear()
 code, _ = d.callback(f"e=doorbell&p=1&t={token}", ip=HOST)
 check(code == 200, "the DoorBird's call is answered 200")
-check(d.events()[:1] == ["Doorbell Pressed (Button 1)"], f"the button's event fires at once ({d.events()})")
+check(d.proxy("ICON_CHANGED", 5001)[-1][2] == {"icon": "ring", "icon_description": "Someone rang"}, "the tile shows the ring at once")
 d.pump()
 ev = d.events()
-check(ev == ["Doorbell Pressed (Button 1)", "Ring"], f"then Ring, with its picture ({ev})")
+check(ev == ["Ring"], f"Ring, with its picture ({ev})")
 ring = [x for x in d.event_vars() if x[0] == "Ring"][0]
 check(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", ring[2] or "") is not None and ring[3] == "1",
       f"LAST_RING (ISO 8601 UTC) and LAST_DOORBELL are set when Ring fires ({ring})")
 pic = base64.b64decode(d.call("GetNotificationAttachmentBytes"))
 check(pic[:2] == b"\xff\xd8" and b"LIVE" in pic, "the notification picture is the live picture at the ring")
-check(d.prop("Last Event").endswith("doorbell button 1") and d.var("LAST_EVENT") == "Doorbell 1", "Last Event")
+check(d.var("LAST_EVENT") == "Doorbell 1", "LAST_EVENT")
 check("Event call from the DoorBird (192.168.50.30): doorbell 1" in "\n".join(d.logs()), "Debug: a line for every call")
 d.clear()
 d.advance(2000)
@@ -153,7 +173,12 @@ check(code == 200 and d.events() == [], "a repeat within 5 s: answered, but one 
 d.advance(6000)
 d.callback(f"e=doorbell&p=1&t={token}", ip=HOST)
 d.pump()
-check(d.events() == ["Doorbell Pressed (Button 1)", "Ring"], "after 5 s it rings again")
+check(d.events() == ["Ring"], "after 5 s it rings again")
+d.callback(f"e=motion&t={token}", ip=HOST)
+check(d.proxy("ICON_CHANGED", 5001)[-1][2]["icon"] == "ring", "motion right after a ring does not hide the ring on the tile")
+d.advance(31000)
+d.pump()
+check(d.proxy("ICON_CHANGED", 5001)[-1][2]["icon"] == "idle", "30 s later the tile is back to idle")
 
 # refused calls
 d.clear()
@@ -167,7 +192,7 @@ check(d.callback(f"e=doorbell&p=1&t={token}", ip=HOST, path="/other")[0] == 404,
 check(d.callback(f"e=doorbell&p=1&t={token}", ip=HOST, method="POST")[0] == 405, "not GET: 405")
 check(d.eval("gServer.refused") >= 4 and "refused: not the DoorBird (192.168.50.30)" in "\n".join(d.logs()), "refused calls are counted and logged")
 d.advance(6000)
-check(d.callback(f"e=keypad&t={token}", ip=HOST)[0] == 200 and d.events() == [], "an event the driver does not know: answered, nothing fires")
+check(d.callback(f"e=garage&t={token}", ip=HOST)[0] == 200 and d.events() == [], "an event the driver does not know: answered, nothing fires")
 
 # motion and alerts
 d.clear()
@@ -206,7 +231,8 @@ d.callback(f"e=rfid&t={token}", ip=HOST)
 check(d.events() == ["RFID Read"] and d.var("LAST_RFID"), "RFID: RFID Read, LAST_RFID")
 d.clear()
 d.callback(f"e=relay&p=2&t={token}", ip=HOST)
-check(d.events() == ["Door Opened (Relay 2)", "Door Opened"] and d.var("LAST_RELAY") == "2", f"relay 2: its event and Door Opened ({d.events()})")
+check(d.events() == ["Door Opened"] and d.var("LAST_RELAY") == "2", f"relay 2: Door Opened, LAST_RELAY 2 ({d.events()})")
+check(d.proxy("ICON_CHANGED", 5001)[-1][2]["icon"] == "open", "the tile shows the gate opening")
 check([p[1] for p in d.proxy(binding=302)] == ["CLOSED"], "the Relay 2 connection shows the pulse")
 d.pump()
 check([p[1] for p in d.proxy(binding=302)] == ["CLOSED", "OPENED"], "then OPENED again")
@@ -218,7 +244,7 @@ n0 = len(bird.opened)
 d.call("ReceivedFromProxy", 301, "CLOSE", d.table({}))
 d.pump()
 check(bird.opened[n0:] == ["1"], "a Gate Controller's CLOSE on Relay 1: open-door.cgi?r=1, once")
-check(d.events() == ["Door Opened (Relay 1)", "Door Opened"], "Door Opened (Relay 1) fires")
+check(d.events() == ["Door Opened"] and d.var("LAST_RELAY") == "1", "Door Opened fires, LAST_RELAY 1")
 d.clear()
 d.callback(f"e=relay&p=1&t={token}", ip=HOST)
 check(d.events() == [], "the DoorBird's own call for that pulse is a repeat")
@@ -240,10 +266,28 @@ check(bird.opened[-1] == "ghchdi@1", "OPEN_DOOR on a door controller's relay")
 lst = d.call("GetCommandParamList", "OPEN_DOOR", "Relay")
 check(list(lst.values()) == ["1", "2", "ghchdi@1", "ghchdi@2"], "OPEN_DOOR lists the DoorBird's relays")
 d.advance(3000)
-d.action("OpenDoor")
+d.action("OpenGate")
 d.command("LIGHT_ON")
 d.pump()
-check(bird.opened[-1] == "1" and bird.lights == 1, "Open Door (Relay 1) action and the IR light")
+check(bird.opened[-1] == "1" and bird.lights == 1, "Open Gate action (Gate Relay: Relay 1) and the IR light")
+
+# the tile: a tap opens the gate (Gate Relay)
+d.advance(3000)
+n0 = len(bird.opened)
+d.call("ReceivedFromProxy", 5001, "SELECT", d.table({}))
+d.pump()
+check(bird.opened[n0:] == ["1"], "a tap on the DoorBird tile opens relay 1")
+d.set_prop("Gate Relay", "Relay 2")
+d.advance(3000)
+d.call("ReceivedFromProxy", 5001, "SELECT", d.table({}))
+d.pump()
+check(bird.opened[n0:] == ["1", "2"], "Gate Relay = Relay 2: the tap opens relay 2")
+d.set_prop("Gate Relay", "Nothing")
+d.advance(3000)
+d.call("ReceivedFromProxy", 5001, "SELECT", d.table({}))
+d.pump()
+check(bird.opened[n0:] == ["1", "2"], "Gate Relay = Nothing: a tap opens nothing")
+d.set_prop("Gate Relay", "Relay 1")
 check(all(c["path"] != "/bha-api/open-door.cgi" or "r" in c["query"] for c in bird.calls), "open-door.cgi always names its relay")
 
 # ================================================================ diagnostics
@@ -262,8 +306,8 @@ d.g.LOGS = d.table({})
 d.action("PrintDiagnostics")
 d.pump()
 report = "\n".join(d.logs())
-check("DoorBird D2101V, firmware 000141 (build 16418935), MAC 1CCAE3712A4F" in report and "Relays        : 1, 2, ghchdi@1, ghchdi@2" in report,
-      "Print Diagnostics: device, firmware, relays")
+check("DoorBird D2101V, firmware 000141 (build 16418935), MAC 1C:CA:E3:71:2A:4F" in report and "Relays        : 1, 2, ghchdi@1, ghchdi@2 - Gate Relay: Relay 1" in report
+      and "API-Operator: yes, Watch Always: yes" in report, "Print Diagnostics: device, firmware, MAC, relays, permissions")
 check("self-test OK" in report, "Print Diagnostics: the event server answers its self-test")
 check(f"'DirectorLink (doorbell 1)' -> http://192.168.50.10:47300/doorbird?e=doorbell&p=1&t=***" in report, "Print Diagnostics: this driver's favorites, token hidden")
 check("other HTTP favorites: 3 ('Gate log', 'Home Assistant (front_door_motion)', 'ServerX'), SIP favorites: 1" in report
@@ -325,8 +369,9 @@ check(len(bird.own_favorite_ids(token)) == 5 and d2.prop("Status") == "Online - 
 
 # ================================================================ permissions
 d, bird = setup(operator=False)
-check(d.prop("Status") == f"Online, but no events: the DoorBird user '{USER}' lacks the API-Operator permission", f"no API-Operator: refused clearly ({d.prop('Status')})")
-check("API-Operator permission" in d.prop("Attention") and d.prop("Permissions").startswith("API-Operator: NO"), "Attention and Permissions say what to fix")
+check(d.prop("Status") == f"Online, but no events: give the DoorBird user '{USER}' the API-Operator permission (DoorBird app: Administration, Users)",
+      f"no API-Operator: refused clearly ({d.prop('Status')})")
+check("lacks API-Operator" in d.eval("ProblemsText()") and d.eval("gPerm.operator") is False, "and listed as the thing to fix")
 check(not [c for c in bird.calls if c["method"] == "POST" or c["query"].get("action")], "nothing is written")
 n = len(bird.calls)
 d.eval("(function() gState.lastSyncAt = 0 end)()")
@@ -344,10 +389,8 @@ for _ in range(3):
 check(d.prop("Status") == "Online - events live", f"once the permission is given, the events register by themselves ({d.prop('Status')})")
 
 d, bird = setup(watch=False, history=False, motion=False)
-check("Watch Always: NO" in d.prop("Permissions") and "History: NO" in d.prop("Permissions") and "Motion: NO" in d.prop("Permissions"),
-      f"no Watch Always, History, Motion: shown ({d.prop('Permissions')})")
-check("also needs: Watch Always" in d.prop("Attention") and "History" in d.prop("Attention"), "Attention lists them")
-check(d.prop("Status") == "Online - events live", "events still work")
+check(d.eval("gPerm.watch") is False and d.eval("gPerm.history") is False and d.eval("gPerm.motion") is False, "no Watch Always, History, Motion: found")
+check(d.prop("Status").startswith("Online - events live. The DoorBird user 'ghchdi0002' also needs: Watch Always"), f"Status says it ({d.prop('Status')})")
 d.clear()
 d.call("ReceivedFromProxy", 301, "CLOSE", d.table({}))
 d.pump()
@@ -355,17 +398,12 @@ check(bird.opened == [] and d.events() == [] and "lacks Watch Always" in "\n".jo
 d.clear()
 d.callback(f"e=doorbell&p=1&t={d.token()}", ip=HOST)
 d.pump()
-check(d.events() == ["Doorbell Pressed (Button 1)", "Ring"] and d.call("GetNotificationAttachmentBytes") == "", "a ring without pictures still rings")
+check(d.events() == ["Ring"] and d.call("GetNotificationAttachmentBytes") == "", "a ring without pictures still rings")
 
 d, bird = setup(watch=False)
 d.callback(f"e=doorbell&p=1&t={d.token()}", ip=HOST)
 d.pump()
 check(b"HIST" in base64.b64decode(d.call("GetNotificationAttachmentBytes")), "without Watch Always: the DoorBird's own ring picture (history.cgi)")
-
-d, bird = setup(props={"Picture With Events": "No"})
-d.clear()
-d.callback(f"e=doorbell&p=1&t={d.token()}", ip=HOST)
-check(d.events() == ["Doorbell Pressed (Button 1)", "Ring"], "Picture With Events = No: Ring fires at once")
 
 # ================================================================ a wrong password costs one try
 d, bird = setup(props={"Password": "wrong"})
@@ -399,17 +437,17 @@ d, bird = setup(one_http_per_input=True)
 same, why = bird.others_unchanged(d.token())
 check(same, f"the other apps' HTTP calls are put back {why}")
 check(bird.outputs_of("doorbell", "1") == [("notify", ""), ("http", "0"), ("sip", "0")], "doorbell 1 is exactly as it was")
-check("doorbell 1: the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.prop("Attention"),
-      f"Attention names who has it ({d.prop('Attention')})")
-check(d.prop("Status") == "Online - some events not registered (see Attention)" and "not registered: doorbell 1, motion" in d.prop("Events"),
-      f"Status and Events ({d.prop('Status')} / {d.prop('Events')})")
-check("relay 1" in d.prop("Events").split(" - ")[0] and "RFID" in d.prop("Events").split(" - ")[0], "the events nobody else uses are registered")
+check("doorbell 1: the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.eval("ProblemsText()"),
+      f"it names who has it ({d.eval('ProblemsText()')})")
+check(d.prop("Status").startswith("Online - some events not registered. Events - doorbell 1: the DoorBird keeps one HTTP call")
+      and "not registered: doorbell 1, motion" in d.eval("gReg.summary"), f"Status and summary ({d.prop('Status')} / {d.eval('gReg.summary')})")
+check("relay 1" in d.eval("gReg.summary").split(" - ")[0] and "RFID" in d.eval("gReg.summary").split(" - ")[0], "the events nobody else uses are registered")
 n = len(bird.calls)
 for _ in range(3):
     d.eval("(function() gState.lastSyncAt = 0 end)()")
     tick(d)
 check(not [c for c in bird.calls[n:] if c["method"] == "POST"], "the taken entries are left alone at the next checks (no retry that would push the other app's call out again)")
-check("Gate log" in d.prop("Attention"), "and Attention still says who has them")
+check("Gate log" in d.eval("ProblemsText()"), "and it still says who has them")
 d2, _ = setup(bird=bird, persist=d.persisted(), start=False)
 d2.start(dit="DIT_STARTUP")
 for _ in range(3):
@@ -434,15 +472,15 @@ check(len(motion_posts) == 2 and d2.eval("gReg.skip['motion|'] ~= nil") is True 
 d, bird = setup(relay_input=False)
 same, why = bird.others_unchanged(d.token())
 check(same, f"nothing else touched {why}")
-att = d.prop("Attention")
+att = d.eval("ProblemsText()")
 check("relay 2: the DoorBird does not take a schedule for relay 2 (HTTP 400)" in att and "relay 1: the DoorBird does not take a schedule for relay 1 (HTTP 400)" in att,
       f"relay events not available: said plainly ({att})")
 n = len(bird.calls)
 d.eval("(function() gState.lastSyncAt = 0 end)()")
 tick(d)
-check(not [c for c in bird.calls[n:] if c["method"] == "POST"] and "relay 2: the DoorBird does not take a schedule" in d.prop("Attention"),
+check(not [c for c in bird.calls[n:] if c["method"] == "POST"] and "relay 2: the DoorBird does not take a schedule" in d.eval("ProblemsText()"),
       "and it does not keep asking")
-check(d.prop("Status") == "Online - some events not registered (see Attention)", "the rest works")
+check(d.prop("Status").startswith("Online - some events not registered"), "the rest works")
 
 # ================================================================ no favoriteid header: the ids are read back
 d, bird = setup(favoriteid_header=False)
@@ -450,12 +488,12 @@ check(d.prop("Status") == "Online - events live" and len(bird.own_favorite_ids(d
 
 # ================================================================ two buttons, old firmware, a busy port
 d, bird = setup(schedule="schedule_two_buttons.json", info="info_d1101v_wifi.json", favorites="favorites_empty.json")
-check(d.dyn_events().get(102) == "Doorbell Pressed (Button 2)" and d.prop("Doorbell Buttons") == "1, 2", "two buttons: an event each")
-check(d.prop("MAC Address") == "1C:CA:E3:71:2B:70", "a WiFi DoorBird's MAC")
+check(d.dyn_events() == {101: "Ring (Button 1)", 102: "Ring (Button 2)"}, f"two buttons: a Ring event each ({d.dyn_events()})")
+check(d.eval("gInfo.mac") == "1CCAE3712B70", "a WiFi DoorBird's MAC")
 d.clear()
 d.callback(f"e=doorbell&p=2&t={d.token()}", ip=HOST)
 d.pump()
-check(d.events() == ["Doorbell Pressed (Button 2)", "Ring"] and d.var("LAST_DOORBELL") == "2", "button 2 rings as button 2")
+check(d.events() == ["Ring (Button 2)", "Ring"] and d.var("LAST_DOORBELL") == "2", f"button 2 rings as button 2 ({d.events()})")
 
 d, bird = setup(info="info_d101_000096.json")
 check(d.prop("Status") == "Online, but no events: firmware 000096 is too old for them (000110 or newer)", f"old firmware: said plainly ({d.prop('Status')})")
@@ -486,6 +524,148 @@ check("8" not in bird.http_favorites() and ("http", "8") not in bird.outputs_of(
       "a favorite an earlier copy left at this controller and port is removed (output first)")
 check("9" in bird.http_favorites() and ("http", "9") in bird.outputs_of("doorbell", "1"), "one at another controller is left alone")
 
+# At another port of this controller: removed only when nothing answers there (a copy still
+# running, as when a new version is added next to the old one, keeps its own)
+bird = DoorBird()
+live, dead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "dddddddddddddddddddddddddddddddd"
+bird.http_favorites()["10"] = {"title": "DirectorLink (doorbell 1)", "value": f"http://192.168.50.10:47301/doorbird?e=doorbell&p=1&t={live}"}
+bird.http_favorites()["11"] = {"title": "DirectorLink (doorbell 1)", "value": f"http://192.168.50.10:47305/doorbird?e=doorbell&p=1&t={dead}"}
+bird.http_favorites()["12"] = {"title": "Gate log", "value": f"http://192.168.50.10:47306/doorbird?e=doorbell&p=1&t={dead}"}
+for fid in ("10", "11", "12"):
+    bird.entry("doorbell", "1")["output"].append({"event": "http", "param": fid, "schedule": {"weekdays": [{"from": "0", "to": "604799"}]}})
+d, _ = setup(bird=bird, start=False)
+d.listening = {47301}
+d.start()
+check("10" in bird.http_favorites() and ("http", "10") in bird.outputs_of("doorbell", "1"),
+      "a copy of this driver that answers at another port keeps its favorite (no tug of war)")
+check("11" not in bird.http_favorites() and ("http", "11") not in bird.outputs_of("doorbell", "1"),
+      "one at a port where nothing answers is an earlier copy's: removed (output first)")
+check("12" in bird.http_favorites() and ("http", "12") in bird.outputs_of("doorbell", "1"), "a favorite with another title is never this driver's")
+check(d.prop("Status") == "Online - events live" and logs_clean(d, live, dead)[0], "and the driver works")
+
+# ================================================================ keypad codes
+# A D2101KV keeps a keypad code as a "doorbell" entry with the code as param (0047 opens relay 1 by itself)
+bird = DoorBird()
+bird.schedule.append({"input": "doorbell", "param": "0047", "output": [
+    {"event": "relay", "param": "1", "schedule": {"weekdays": [{"from": "108000", "to": "107999"}]}}]})
+bird.original_schedule = copy.deepcopy(bird.schedule)
+d, _ = setup(bird=bird)
+kfav = [i for i in bird.own_favorite_ids(d.token()) if bird.http_favorites()[i]["title"] == "DirectorLink (keypad code 0047)"]
+check(len(kfav) == 1 and "e=keypad&p=0047&" in bird.http_favorites()[kfav[0]]["value"], "a keypad code gets its own favorite")
+check(bird.outputs_of("doorbell", "0047") == [("relay", "1"), ("http", kfav[0])], "the code still opens relay 1 itself, the HTTP call is added last")
+check(d.dyn_events() == {} and "keypad code 0047" in d.eval("gReg.summary"),
+      f"registered, and a code is not a bell button: no Ring event for it ({d.dyn_events()})")
+check(bird.others_unchanged(d.token())[0], "nothing else touched")
+d.clear()
+d.callback(f"e=keypad&p=0047&t={d.token()}", ip=HOST)
+d.pump()
+check(d.events() == ["Keypad Code Entered"] and d.var("LAST_KEYPAD_CODE") == "0047" and d.var("LAST_EVENT") == "Keypad code",
+      f"Keypad Code Entered, LAST_KEYPAD_CODE 0047 for programming, not in LAST_EVENT ({d.events()})")
+check(not d.proxy("ICON_CHANGED", 5001), "a code does not show as a ring")
+d.callback(f"e=relay&p=1&t={d.token()}", ip=HOST)
+check(d.events() == ["Keypad Code Entered", "Door Opened"], "then the gate it opened: Door Opened")
+hist = [list(h.values()) for h in d.g.HISTORY.values()]
+check(any("Keypad code entered" in str(h) for h in hist) and not any("0047" in str(h) for h in hist),
+      f"the code opens the gate: not in Control4 History ({hist})")
+d.action("PrintDiagnostics")
+d.pump()
+text = "\n".join(d.logs())
+check(logs_clean(d, "0047")[0] and "keypad code ***" in text and "e=keypad&p=***&t=***" in text,
+      "nor in any log line or Print Diagnostics (masked like the password)")
+check("47300" in text and "000141" in text, "other numbers in the log are left as they are")
+d2, _ = setup(bird=DoorBird(), persist=d.persisted(), start=False)
+d2.start(dit="DIT_STARTUP", pump=False)
+d2.action("PrintDiagnostics")
+d2.pump()
+check(logs_clean(d2, "0047")[0], "after a restart too, before the DoorBird is read")
+
+
+
+def keypad_bird(other_http=False, **kw):
+    """Codes 0047 and 5791, each opening relay 1 (other_http: 0047 also calls another app's favorite #0)."""
+    b = DoorBird(**kw)
+    week = {"weekdays": [{"from": "108000", "to": "107999"}]}
+    for code in ("0047", "5791"):
+        outs = [{"event": "relay", "param": "1", "schedule": week}]
+        if other_http and code == "0047":
+            outs.append({"event": "http", "param": "0", "schedule": week})
+        b.schedule.append({"input": "doorbell", "param": code, "output": copy.deepcopy(outs)})
+    b.original_schedule = copy.deepcopy(b.schedule)
+    return b
+
+
+def hold_port(d, port):
+    """Requests to this port of the controller never end (no answer, no error)."""
+    d.run(f"""
+    local url = C4.url
+    function C4:url()
+      local x = url(self)
+      local get = x.Get
+      function x:Get(u, h)
+        if string.find(u, ":{port}/", 1, true) then HELD = (HELD or 0) + 1; return self end
+        return get(self, u, h)
+      end
+      return x
+    end""")
+
+
+# Keypad codes come after the bell, motion, RFID and the relays (a DoorBird with no room left keeps those)
+check(d.eval("gReg.summary").index("keypad code") > d.eval("gReg.summary").index("relay 2"), f"keypad codes are registered last ({d.eval('gReg.summary')})")
+
+# Status never shows a code
+d, bird = setup(bird=keypad_bird(other_http=True, one_http_per_input=True))
+check("keypad code ***: the DoorBird keeps one HTTP call for doorbell ***" in d.prop("Status") and "0047" not in d.prop("Status") and "5791" not in d.prop("Status")
+      and logs_clean(d, "0047", "5791")[0], f"a problem with a keypad entry: Status says it without the code ({d.prop('Status')})")
+
+# An earlier copy's favorite for a code that is no longer in the schedule
+bird = DoorBird()
+bird.http_favorites()["8"] = {"title": "DirectorLink (keypad code 9876)",
+                              "value": "http://192.168.50.10:47300/doorbird?e=keypad&p=9876&t=ffffffffffffffffffffffffffffffff"}
+d, _ = setup(bird=bird)
+check("8" not in bird.http_favorites() and logs_clean(d, "9876")[0], "an earlier copy's keypad favorite: removed, its code not logged")
+
+# A probe that never gets an answer: after a while it counts as doubt, the sync ends, and the other copy keeps its favorite
+bird = keypad_bird()
+d, _ = setup(bird=bird)
+persist = d.persisted()
+copy_fav = {"title": "DirectorLink (doorbell 1)", "value": "http://192.168.50.10:47377/doorbird?e=doorbell&p=1&t=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+bird.http_favorites()["20"] = copy_fav
+d, _ = setup(bird=bird, persist=persist, start=False)
+hold_port(d, 47377)
+d.start(dit="DIT_STARTUP", pump=False)
+for _ in range(50):
+    d.pump(5000, 1)
+    if d.eval("HELD"):
+        break
+check(d.eval("HELD") == 1 and d.eval("gReg.busy") is True, "while the probe waits, the sync waits")
+d.action("PrintDiagnostics")
+d.pump(2000)
+check(logs_clean(d, "0047", "5791")[0], "Print Diagnostics meanwhile shows no keypad code (known from the saved and the read favorites)")
+d.pump(15000)
+for _ in range(3):
+    d.pump()
+check(d.eval("gReg.busy") is False and d.prop("Status") == "Online - events live" and bird.http_favorites().get("20") == copy_fav,
+      f"no answer in 10 s: the sync goes on, the other copy's favorite stays ({d.prop('Status')})")
+
+# The camera page: a problem with it is cleared once someone fixes the page by hand
+d, bird = setup()
+page = ("<properties><address>{a}</address><http_port>80</http_port><rtsp_port>554</rtsp_port><authentication_required>True</authentication_required>"
+        "<authentication_type>BASIC</authentication_type><username>{u}</username><use_https>False</use_https></properties>")
+d.g.PROXY_PROPS = page.format(a="10.0.0.9", u=USER)
+d.action("Reconnect")
+for _ in range(3):
+    d.pump()
+d.advance(4000)
+d.pump()
+check("Open the DoorBird Camera's Properties page" in d.prop("Status"), f"a camera page that does not take the values: said in Status ({d.prop('Status')})")
+d.g.PROXY_PROPS = page.format(a=HOST, u=USER)
+d.eval("(function() gState.pageWrittenAt = 0 end)()")  # os.time() is the real clock: as if the write was long ago
+d.call("ReceivedFromProxy", 5002, "SET_ADDRESS", d.table({"ADDRESS": HOST}))
+d.advance(3000)
+d.pump()
+check(d.prop("Status") == "Online - events live", f"fixed by hand on the camera page: Status is clear again ({d.prop('Status')})")
+d.g.PROXY_PROPS = ""
+
 # ================================================================ offline and back
 d, bird = setup()
 d.clear()
@@ -494,9 +674,11 @@ tick(d)
 check("DoorBird Offline" not in d.events(), "one missed check is not offline yet")
 tick(d)
 check(d.events() == ["DoorBird Offline"] and d.prop("Status").startswith("Offline - cannot reach the DoorBird at 192.168.50.30"), f"two: offline ({d.prop('Status')})")
+check(d.proxy("ICON_CHANGED", 5001)[-1][2] == {"icon": "offline", "icon_description": "DoorBird offline"}, "the tile shows it")
 bird.up = True
 tick(d)
 check(d.events() == ["DoorBird Offline", "DoorBird Online"], "and back online")
+check(d.proxy("ICON_CHANGED", 5001)[-1][2]["icon"] == "idle", "the tile too")
 
 # ================================================================ a new address: the old DoorBird is left clean
 a = DoorBird(cascade="entry")
@@ -539,14 +721,14 @@ a.up = False
 d.set_prop("Address", "192.168.50.31")
 for _ in range(5):
     d.pump()
-check("still on the DoorBird at 192.168.50.30" in d.prop("Attention") and d.prop("Status") == "Online - events live",
-      f"the old one does not answer: Attention, and the new one works ({d.prop('Attention')})")
+check("still on the DoorBird at 192.168.50.30" in d.eval("ProblemsText()") and d.prop("Status").startswith("Online - events live"),
+      f"the old one does not answer: said so, and the new one works ({d.prop('Status')})")
 a.up = True
 d.advance(900 * 1000)
 d.pump(10000)
 for _ in range(5):
     d.pump()
-check(a.own_favorite_ids(tok) == [] and "still on the DoorBird" not in d.prop("Attention"), "when it answers again, it is left clean")
+check(a.own_favorite_ids(tok) == [] and "still on the DoorBird" not in d.eval("ProblemsText()"), "when it answers again, it is left clean")
 
 # the same DoorBird at a new address (DHCP): the same MAC, so its HTTP calls are kept and updated
 moved = DoorBird()
@@ -560,7 +742,7 @@ d.set_prop("Address", "192.168.50.44")
 for _ in range(5):
     d.pump()
 check(moved.own_favorite_ids(tok) == ids and moved.entry("relay", "2") is not None, "a DoorBird that moved: the same favorites, nothing removed")
-check(d.eval("#gCfg.olds") == 0 and d.eval("gReg.created['relay|2']") is True and d.prop("Attention") == "",
+check(d.eval("#gCfg.olds") == 0 and d.eval("gReg.created['relay|2']") is True and d.eval("ProblemsText()") == "",
       "it is not an old DoorBird to leave, and the entry it created is still known as its own")
 d.g.CONTROLLER_IP = "192.168.50.10"
 d.action("RemoveFromDoorBird")
@@ -635,8 +817,8 @@ check(added["done"] and ("http", "1") in bird.outputs_of("doorbell", "1") and bi
 
 # A DoorBird that keeps the first HTTP call (this driver's goes): reported, not retried every 30 minutes
 d, bird = setup(one_http_per_input=True, keep="first")
-check(bird.others_unchanged(d.token())[0] and "the DoorBird did not keep the HTTP call for doorbell 1" in d.prop("Attention"),
-      f"keep-first: the other app keeps it, Attention says so ({d.prop('Attention')})")
+check(bird.others_unchanged(d.token())[0] and "the DoorBird did not keep the HTTP call for doorbell 1" in d.eval("ProblemsText()"),
+      f"keep-first: the other app keeps it, and it is said ({d.eval('ProblemsText()')})")
 n = len(bird.calls)
 d.eval("(function() gState.lastSyncAt = 0 end)()")
 tick(d)
@@ -645,14 +827,14 @@ check(not [c for c in bird.calls[n:] if c["method"] == "POST"], "and it is not w
 # A DoorBird that changes another app's times when a second HTTP call comes: put back
 d, bird = setup(trim_others=True)
 check(bird.others_unchanged(d.token())[0], "another app's output changed (not dropped) is put back as it was")
-check("the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.prop("Attention"), "and reported")
+check("the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.eval("ProblemsText()"), "and reported")
 
 # An entry whose output is not a list: left alone
 bird = DoorBird()
 bird.schedule[0]["output"] = {"0": bird.schedule[0]["output"][0]}
 bird.original_schedule[0]["output"] = dict(bird.schedule[0]["output"])
 d, _ = setup(bird=bird)
-check(isinstance(bird.entry("doorbell", "1")["output"], dict) and "has a form this driver does not know" in d.prop("Attention"),
+check(isinstance(bird.entry("doorbell", "1")["output"], dict) and "has a form this driver does not know" in d.eval("ProblemsText()"),
       "an entry in a form the driver does not know is left alone, and said so")
 
 # The address changes while a request is on its way: nothing of the old DoorBird reaches the new one
@@ -783,7 +965,7 @@ bird.password = "New-Pass-1"
 settle(d)
 check(bird.outputs_of("doorbell", "1") == [("notify", ""), ("http", "0"), ("sip", "0")] and bird.others_unchanged(d.token())[0],
       "the other app's call is put back where it was, once the DoorBird answers again")
-check("the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.prop("Attention"), "and Attention says so")
+check("the DoorBird keeps one HTTP call for doorbell 1, and HTTP call 'Gate log' has it" in d.eval("ProblemsText()"), "and it is said")
 
 # Director restarts between a write and its read back: the check follows after the restart
 bird = DoorBird(one_http_per_input=True, keep="last")

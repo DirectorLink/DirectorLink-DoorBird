@@ -5,6 +5,9 @@
     One HTTP favorite per event, titled "DirectorLink (<event>)", whose URL
     points at this driver's event server with the event and the token:
       doorbell:<n>   each doorbell button   (schedule input "doorbell", param <n>)
+      keypad:<code>  each keypad code       (input "doorbell", param <code>: on keypad
+                     models a code is a "doorbell" entry; codes have 4 or more digits
+                     or a leading zero, buttons do not)
       motion         the motion sensor      (input "motion")
       rfid           any RFID tag           (every "rfid" entry the DoorBird has)
       relay:<n>      each relay of the DoorBird itself (input "relay", param <n>)
@@ -39,9 +42,9 @@
       - a change of address or login waits for the job on its way to end,
         and anything still made for the old one is cancelled: nothing made
         for one DoorBird reaches another.
-    Favorites of an earlier copy of this driver on the same controller and
-    port ("DirectorLink (...)" at this event server, another token) are
-    removed the same way.
+    Favorites of an earlier copy of this driver on the same controller
+    ("DirectorLink (...)" at /doorbird on this controller's address, any
+    port, another token) are removed the same way.
 
     Copyright 2026 DirectorLink
     SPDX-License-Identifier: Apache-2.0
@@ -75,6 +78,7 @@ end
 function KeyLabel(key)
 	local kind, param = KeyParts(key)
 	if kind == "rfid" then return "RFID" end
+	if kind == "keypad" then return "keypad code " .. param end
 	return kind .. (param ~= "" and (" " .. param) or "")
 end
 
@@ -96,6 +100,7 @@ function KeyMatchesEntry(key, input, param)
 	local kind, p = KeyParts(key)
 	if kind == "motion" then return input == "motion" end
 	if kind == "rfid" then return input == "rfid" end
+	if kind == "keypad" then return input == "doorbell" and param == p end
 	return input == kind and param == p
 end
 
@@ -124,12 +129,21 @@ function OwnFavoriteKey(value, token)
 	return p ~= "" and (e .. ":" .. p) or e
 end
 
--- A favorite an earlier copy of this driver left at this controller and port (another token)
-local function IsOrphan(fav, ctx)
+-- A favorite an earlier copy of this driver left on this DoorBird from this controller (any port: a
+-- copy deleted and added again has another device id, so another port), with another token
+-- A favorite of another copy of this driver at this controller (another token). At this driver's
+-- port it is an earlier copy's: nothing else listens there. At another port it is an orphan only
+-- when nothing answers there (dead[port]): a copy still running keeps its own. Also returns that
+-- other port, to be probed.
+local function IsOrphan(fav, ctx, dead)
 	if string.sub(fav.title or "", 1, #REG_TITLE_PREFIX) ~= REG_TITLE_PREFIX then return false end
 	local hostport, path, query = SplitUrl(fav.value)
+	local host, port = string.match(hostport or "", "^([^:]+):?(%d*)$")
 	local t = QueryValue(query, "t")
-	return path == EVENT_PATH and hostport == (ctx.ctrl .. ":" .. ctx.port) and t ~= nil and t ~= "" and t ~= ctx.token
+	if path ~= EVENT_PATH or host ~= ctx.ctrl or t == nil or t == "" or t == ctx.token then return false end
+	port = tonumber(port) or 80
+	if port == tonumber(ctx.port) then return true end
+	return dead ~= nil and dead[port] == true, port
 end
 
 local function SortParams(list)
@@ -143,20 +157,21 @@ local function SortParams(list)
 end
 
 -- The events to register: each doorbell button the schedule knows (button 1 when it knows none),
--- motion, RFID when the DoorBird has tags, and each of the DoorBird's own relays.
+-- motion, RFID when the DoorBird has tags, each of the DoorBird's own relays, and each keypad code.
 function DesiredKeys(entries, relays)
-	local buttons, seen, hasRfid, relaySeen = {}, {}, false, {}
+	local buttons, codes, seen, hasRfid, relaySeen = {}, {}, {}, false, {}
 	for _, e in ipairs(entries or {}) do
 		local input, param = EntryInput(e), EntryParam(e)
 		if input == "doorbell" and param ~= "" and not seen[param] then
 			seen[param] = true
-			buttons[#buttons + 1] = param
+			if IsKeypadCode(param) then codes[#codes + 1] = param else buttons[#buttons + 1] = param end
 		elseif input == "rfid" then
 			hasRfid = true
 		end
 	end
 	if #buttons == 0 then buttons = { "1" } end
 	SortParams(buttons)
+	table.sort(codes)
 	local keys = {}
 	for _, b in ipairs(buttons) do keys[#keys + 1] = "doorbell:" .. b end
 	keys[#keys + 1] = "motion"
@@ -171,6 +186,9 @@ function DesiredKeys(entries, relays)
 	if #physical == 0 and #(relays or {}) == 0 then physical = { "1" } end
 	SortParams(physical)
 	for _, r in ipairs(physical) do keys[#keys + 1] = "relay:" .. r end
+	-- Keypad codes last: if the DoorBird has no room for more favorites, the bell, motion, RFID and
+	-- the relays come first
+	for _, c in ipairs(codes) do keys[#keys + 1] = "keypad:" .. c end
 	return keys
 end
 
@@ -274,7 +292,7 @@ local function FindEntry(entries, input, param)
 	return nil
 end
 
--- What an output of another app is, for the log and Attention (titles only: URLs may hold logins)
+-- What an output of another app is, for the log and Status (titles only: URLs may hold logins)
 local function DescribeOther(k, favs)
 	local event, param = string.match(k, "^([^|]*)|([^|]*)|")
 	if event == "http" then
@@ -409,6 +427,27 @@ local function Each(job, list, fn, done)
 		fn(list[i], step)
 	end
 	step()
+end
+
+-- The other ports of this controller that favorites of other copies point at, probed in turn:
+-- done(dead) with dead[port] = true where nothing answers
+local function ProbeOrphanPorts(job, favs, ctx, done)
+	local ports, seen, dead = {}, {}, {}
+	for _, f in pairs(favs) do
+		local orphan, port = IsOrphan(f, ctx)
+		if not orphan and port and not seen[port] then
+			seen[port] = true
+			ports[#ports + 1] = port
+		end
+	end
+	table.sort(ports)
+	Each(job, ports, function(port, nextStep)
+		EventServerProbe(ctx.ctrl, port, function(answers)
+			if not answers then dead[port] = true end
+			LogDebug("Port %d of this controller: %s", port, answers and "a copy of this driver may listen there, its favorites stay" or "nothing listens")
+			nextStep()
+		end)
+	end, function() done(dead) end)
 end
 
 -- A job on its way to this target
@@ -779,140 +818,143 @@ function RegistrationSync(t, ctx, done)
 		if not favs then return Fail(job, code, err, "favorites") end
 		job.favs = favs
 		gReg.favs, gReg.sipCount = favs, sipCount or 0
-		ReadSchedule(t, job.gen, function(entries, scode, serr)
+		ProbeOrphanPorts(job, favs, ctx, function(dead)
 			if not Current(job) then return end
-			if not entries then return Fail(job, scode, serr, "schedule") end
-			job.entries = entries
-			job.keys = DesiredKeys(entries, ctx.relays)
-			if RegistrationKeysFound then pcall(RegistrationKeysFound, job.keys) end
-			-- This driver's favorites by key; duplicates, old keys and orphans go
-			job.own, job.drop = {}, {}
-			local ids = {}
-			for id in pairs(favs) do ids[#ids + 1] = id end
-			SortParams(ids)
-			local wanted = {}
-			for _, k in ipairs(job.keys) do wanted[k] = true end
-			for _, id in ipairs(ids) do
-				local f = favs[id]
-				local key = OwnFavoriteKey(f.value, ctx.token)
-				if key and wanted[key] and not job.own[key] then
-					job.own[key] = id
-				elseif key then
-					job.drop[#job.drop + 1] = id
-				elseif IsOrphan(f, ctx) then
-					LogInfo("Removing '%s' (#%s): an earlier copy of this driver made it", f.title, id)
-					job.drop[#job.drop + 1] = id
-				end
-			end
-			-- Save the favorites that are missing or point at an old address
-			local saves = {}
-			for _, k in ipairs(job.keys) do
-				local url, title = KeyUrl(ctx, k), KeyTitle(k)
-				local id = job.own[k]
-				if not id or favs[id].value ~= url or favs[id].title ~= title then
-					saves[#saves + 1] = { key = k, url = url, title = title, id = id }
-				end
-			end
-			local needReread = false
-			Each(job, saves, function(s, nextStep)
-				SaveFavorite(t, job.gen, s.title, s.url, s.id, function(ok, fcode, ferr, newId)
-					if not Current(job) then return end
-					if not ok then
-						job.problems[s.key] = "the HTTP call could not be saved: " .. WhyNot(fcode, ferr)
-						LogWarn("Saving '%s': %s", s.title, WhyNot(fcode, ferr))
-					elseif s.id then
-						favs[s.id] = { title = s.title, value = s.url }
-					elseif newId and tostring(newId) ~= "" then
-						job.own[s.key] = tostring(newId)
-						favs[tostring(newId)] = { title = s.title, value = s.url }
-					else
-						needReread = true
+			ReadSchedule(t, job.gen, function(entries, scode, serr)
+				if not Current(job) then return end
+				if not entries then return Fail(job, scode, serr, "schedule") end
+				job.entries = entries
+				job.keys = DesiredKeys(entries, ctx.relays)
+				if RegistrationKeysFound then pcall(RegistrationKeysFound, job.keys) end
+				-- This driver's favorites by key; duplicates, old keys and orphans go
+				job.own, job.drop = {}, {}
+				local ids = {}
+				for id in pairs(favs) do ids[#ids + 1] = id end
+				SortParams(ids)
+				local wanted = {}
+				for _, k in ipairs(job.keys) do wanted[k] = true end
+				for _, id in ipairs(ids) do
+					local f = favs[id]
+					local key = OwnFavoriteKey(f.value, ctx.token)
+					if key and wanted[key] and not job.own[key] then
+						job.own[key] = id
+					elseif key then
+						job.drop[#job.drop + 1] = id
+					elseif IsOrphan(f, ctx, dead) then
+						LogInfo("Removing '%s' (#%s): an earlier copy of this driver made it", f.title, id)
+						job.drop[#job.drop + 1] = id
 					end
-					nextStep()
-				end)
-			end, function()
-				local function plan()
-					job.managed = {}
-					for _, id in pairs(job.own) do job.managed[id] = true end
-					for _, id in ipairs(job.drop) do job.managed[id] = true end
-					job.want = function(input, param)
-						local want, list = {}, {}
-						for _, k in ipairs(job.keys) do
-							local id = job.own[k]
-							if id and KeyMatchesEntry(k, input, param) and not want[id] then
-								want[id] = true
-								list[#list + 1] = id
-							end
+				end
+				-- Save the favorites that are missing or point at an old address
+				local saves = {}
+				for _, k in ipairs(job.keys) do
+					local url, title = KeyUrl(ctx, k), KeyTitle(k)
+					local id = job.own[k]
+					if not id or favs[id].value ~= url or favs[id].title ~= title then
+						saves[#saves + 1] = { key = k, url = url, title = title, id = id }
+					end
+				end
+				local needReread = false
+				Each(job, saves, function(s, nextStep)
+					SaveFavorite(t, job.gen, s.title, s.url, s.id, function(ok, fcode, ferr, newId)
+						if not Current(job) then return end
+						if not ok then
+							job.problems[s.key] = "the HTTP call could not be saved: " .. WhyNot(fcode, ferr)
+							LogWarn("Saving '%s': %s", s.title, WhyNot(fcode, ferr))
+						elseif s.id then
+							favs[s.id] = { title = s.title, value = s.url }
+						elseif newId and tostring(newId) ~= "" then
+							job.own[s.key] = tostring(newId)
+							favs[tostring(newId)] = { title = s.title, value = s.url }
+						else
+							needReread = true
 						end
-						return want, list
-					end
-					-- Entries the DoorBird does not have yet (a relay, a first doorbell button, motion)
-					local creatable = {}
-					for _, k in ipairs(job.keys) do
-						if job.own[k] then
-							local found = false
-							for _, e in ipairs(entries) do
-								if KeyMatchesEntry(k, EntryInput(e), EntryParam(e)) then found = true end
+						nextStep()
+					end)
+				end, function()
+					local function plan()
+						job.managed = {}
+						for _, id in pairs(job.own) do job.managed[id] = true end
+						for _, id in ipairs(job.drop) do job.managed[id] = true end
+						job.want = function(input, param)
+							local want, list = {}, {}
+							for _, k in ipairs(job.keys) do
+								local id = job.own[k]
+								if id and KeyMatchesEntry(k, input, param) and not want[id] then
+									want[id] = true
+									list[#list + 1] = id
+								end
 							end
-							if not found then
-								local input, param = CreatableEntry(k)
-								if input then
-									creatable[#creatable + 1] = { input = input, param = param, create = true }
-								elseif not job.problems[k] then
-									job.problems[k] = "the DoorBird has no " .. KeyLabel(k) .. " in its schedule"
+							return want, list
+						end
+						-- Entries the DoorBird does not have yet (a relay, a first doorbell button, motion)
+						local creatable = {}
+						for _, k in ipairs(job.keys) do
+							if job.own[k] then
+								local found = false
+								for _, e in ipairs(entries) do
+									if KeyMatchesEntry(k, EntryInput(e), EntryParam(e)) then found = true end
+								end
+								if not found then
+									local input, param = CreatableEntry(k)
+									if input then
+										creatable[#creatable + 1] = { input = input, param = param, create = true }
+									elseif not job.problems[k] then
+										job.problems[k] = "the DoorBird has no " .. KeyLabel(k) .. " in its schedule"
+									end
 								end
 							end
 						end
-					end
-					job.targets = Targets(job, entries, creatable)
-					ApplyChanges(job, function(after)
-						if not Current(job) then return end
-						-- The favorites that go: only once a read shows none of them in the schedule
-						local drops = {}
-						for _, id in ipairs(after and job.drop or {}) do
-							local still = false
-							for _, e in ipairs(after) do
-								if OwnIdsIn(e, { [id] = true })[id] then still = true end
-							end
-							if still then
-								LogWarn("Favorite #%s is still in the schedule: not deleting it now", id)
-							else
-								drops[#drops + 1] = id
-							end
-						end
-						if not after and #job.drop > 0 then LogWarn("Not deleting old favorites now: the schedule could not be read back") end
-						local function results() Results(job, saves, drops, entries, after) end
-						if #drops == 0 then return results() end
-						-- Read once more right before deleting: a favorite still in the schedule is not deleted
-						ReadSchedule(t, job.gen, function(fresh)
+						job.targets = Targets(job, entries, creatable)
+						ApplyChanges(job, function(after)
 							if not Current(job) then return end
-							local sure = {}
-							for _, id in ipairs(drops) do
-								local still = not fresh
-								for _, e in ipairs(fresh or {}) do
+							-- The favorites that go: only once a read shows none of them in the schedule
+							local drops = {}
+							for _, id in ipairs(after and job.drop or {}) do
+								local still = false
+								for _, e in ipairs(after) do
 									if OwnIdsIn(e, { [id] = true })[id] then still = true end
 								end
-								if not still then sure[#sure + 1] = id end
+								if still then
+									LogWarn("Favorite #%s is still in the schedule: not deleting it now", id)
+								else
+									drops[#drops + 1] = id
+								end
 							end
-							drops = sure
-							Each(job, drops, function(id, nextStep)
-								DeleteFavorite(t, job.gen, id, function() nextStep() end)
-							end, results)
+							if not after and #job.drop > 0 then LogWarn("Not deleting old favorites now: the schedule could not be read back") end
+							local function results() Results(job, saves, drops, entries, after) end
+							if #drops == 0 then return results() end
+							-- Read once more right before deleting: a favorite still in the schedule is not deleted
+							ReadSchedule(t, job.gen, function(fresh)
+								if not Current(job) then return end
+								local sure = {}
+								for _, id in ipairs(drops) do
+									local still = not fresh
+									for _, e in ipairs(fresh or {}) do
+										if OwnIdsIn(e, { [id] = true })[id] then still = true end
+									end
+									if not still then sure[#sure + 1] = id end
+								end
+								drops = sure
+								Each(job, drops, function(id, nextStep)
+									DeleteFavorite(t, job.gen, id, function() nextStep() end)
+								end, results)
+							end)
 						end)
-					end)
-				end
-				if not needReread then return plan() end
-				ReadFavorites(t, job.gen, function(again, rcode, rerr)
-					if not Current(job) then return end
-					if not again then return Fail(job, rcode, rerr, "favorites") end
-					favs = again
-					job.favs = again
-					gReg.favs = again
-					for id, f in pairs(again) do
-						local key = OwnFavoriteKey(f.value, ctx.token)
-						if key and wanted[key] and not job.own[key] then job.own[key] = id end
 					end
-					plan()
+					if not needReread then return plan() end
+					ReadFavorites(t, job.gen, function(again, rcode, rerr)
+						if not Current(job) then return end
+						if not again then return Fail(job, rcode, rerr, "favorites") end
+						favs = again
+						job.favs = again
+						gReg.favs = again
+						for id, f in pairs(again) do
+							local key = OwnFavoriteKey(f.value, ctx.token)
+							if key and wanted[key] and not job.own[key] then job.own[key] = id end
+						end
+						plan()
+					end)
 				end)
 			end)
 		end)

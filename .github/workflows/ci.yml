@@ -19,6 +19,8 @@ jobs:
           sudo apt-get install -y lua5.1
       - name: Lua checks
         run: cd tests && python test_static.py
+      - name: driver.xml is generated from tools/driver.xml.in
+        run: python tools/gen_xml.py && git diff --exit-code src/driver.xml
       - name: driver.xml checks
         run: cd tests && python test_xml.py
       - name: JSON, API answers, event keys

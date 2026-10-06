@@ -24,13 +24,16 @@ end
     Lines go to the Lua tab (print) and to Director's driver log (C4:DebugLog,
     C4:ErrorLog for errors), so a shared driver_log.log shows them.
     Every line passes through Redact(): the DoorBird password and the event
-    token are registered as secrets and never reach a log.                    ]]
+    token are registered as secrets and never reach a log, nor do keypad
+    codes and RFID tag numbers (they open the door; a tag can be copied from
+    its number).                                                              ]]
 LOG_LEVEL = 2
 LOG_PREFIX = "DoorBird"
 local LEVEL_TAGS = { "ERROR", "WARN", "INFO", "DEBUG", "TRACE" }
 LOG_LEVELS = { Off = 0, Errors = 1, Warnings = 2, Info = 3, Debug = 4, Trace = 5 }
 
 local gSecrets = {}
+local gCodes = {}
 
 -- A value that must never be logged (shorter values are too likely to be ordinary text)
 function RegisterSecret(s)
@@ -39,6 +42,13 @@ end
 
 function ForgetSecret(s)
 	if s then gSecrets[s] = nil end
+end
+
+-- A keypad code or an RFID tag number: masked wherever it stands on its own ("code 0047", "p=0047",
+-- "RFID 0012345678"), not inside another number or word (a code is short)
+function RegisterCode(code)
+	code = tostring(code or "")
+	if #code >= 3 and string.match(code, "^%w+$") then gCodes[code] = true end
 end
 
 local function PlainPattern(s)
@@ -52,6 +62,9 @@ function Redact(msg)
 		-- The same secret as it travels inside a URL (favorites.cgi value=...)
 		local enc = UrlEncode(s)
 		if enc ~= s and string.find(msg, enc, 1, true) then msg = string.gsub(msg, PlainPattern(enc), "***") end
+	end
+	for c in pairs(gCodes) do
+		if string.find(msg, c, 1, true) then msg = string.gsub(msg, "%f[%w]" .. c .. "%f[%W]", "***") end
 	end
 	return msg
 end

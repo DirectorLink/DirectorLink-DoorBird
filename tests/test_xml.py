@@ -3,8 +3,9 @@
 Catches definitions Composer rejects at install time - for example a property of
 type PASSWORD, which Composer reports as "Property Invalid ... Object reference not
 set to an instance of an object". Password fields are STRING + <password>true</password>.
-Also the DirectorLink camera agreement (events "Alert" = 1 and "Ring" = 2) and the
-brand rules (Composer name, maker metadata, no brand on what the family sees).
+Also the DirectorLink camera agreement (events "Alert" = 1 and "Ring" = 2), the
+brand rules (Composer name, maker metadata, no brand on what the family sees), the
+two devices (the DoorBird tile and the DoorBird Camera) and the tile's icons.
 """
 import os
 import re
@@ -62,13 +63,15 @@ check(not [n for n in family if "directorlink" in (n or "").lower()], "no brand 
 # The DirectorLink camera agreement v1: events named exactly "Alert" and "Ring" (ids 1 and 2, never to change)
 ev = {e.findtext("name"): e.findtext("id") for e in events}
 check(ev.get("Alert") == "1" and ev.get("Ring") == "2", f"events 'Alert' (1) and 'Ring' (2) ({ev.get('Alert')}, {ev.get('Ring')})")
-for name in ("Motion Detected", "RFID Read", "Door Opened", "DoorBird Online", "DoorBird Offline"):
+for name in ("Motion Detected", "Keypad Code Entered", "RFID Read", "Door Opened", "DoorBird Online", "DoorBird Offline"):
     check(name in ev, f"programming event '{name}'")
 cmds = {c.findtext("name"): c for c in root.findall("config/commands/command")}
 check(set(cmds) == {"OPEN_DOOR", "LIGHT_ON", "SET_ALERT_ON_MOTION"}, f"commands: Open Door, IR light, alert on motion ({sorted(cmds)})")
 check(cmds["OPEN_DOOR"].find("params/param/type").text == "DYNAMIC_LIST", "Open Door lists the DoorBird's relays (DYNAMIC_LIST)")
 actions = [a.findtext("command") for a in root.findall("config/actions/action")]
-check({"PrintDiagnostics", "TestPictures", "Reconnect", "OpenDoor", "LightOn", "RemoveFromDoorBird"} == set(actions), f"actions ({actions})")
+check(["PrintDiagnostics", "TestPictures", "Reconnect", "OpenGate", "LightOn", "RemoveFromDoorBird"] == actions, f"actions ({actions})")
+check(names == ["Status", "DoorBird", "Address", "Username", "Password", "Gate Relay", "Alert On Motion", "Log Level"],
+      f"only the properties an installer needs ({names})")
 
 caps = root.find("capabilities")
 check(caps.findtext("modes") == "SNAPSHOT, MJPEG, H264", "camera: snapshots, MJPEG and H.264")
@@ -77,8 +80,27 @@ check(caps.findtext("default_authentication_type") == "BASIC" and caps.findtext(
 check(caps.find("requires_dynamic_stream_urls") is None, "camera: static stream paths (work from Control4 OS 3.3.0)")
 check(root.findtext("notification_attachment_provider") == "true" and root.find("notification_attachments/attachment/source").text == "MEMORY",
       "a notification picture (MEMORY)")
-proxy = root.find("proxies/proxy")
-check(proxy.text == "camera" and proxy.get("proxybindingid") == "5001" and proxy.get("primary") == "True", "the camera proxy (5001) is the primary proxy")
+# Two devices in Composer: the DoorBird (a tile, primary) and the DoorBird Camera
+proxies = [(x.get("proxybindingid"), x.text, x.get("name"), x.get("primary")) for x in root.findall("proxies/proxy")]
+check(proxies == [("5001", "uibutton", "DoorBird", "True"), ("5002", "camera", "DoorBird Camera", None)],
+      f"the DoorBird tile (5001, primary) and the DoorBird Camera (5002) ({proxies})")
+for x in root.findall("proxies/proxy"):
+    for a in ("small_image", "large_image"):
+        check(os.path.exists(os.path.join(ROOT, "src", "www", x.get(a))), f"{x.get('name')}: {a} {x.get(a)} exists")
+conns = {c.findtext("id"): c.findtext("classes/class/classname") for c in root.findall("connections/connection")}
+check(conns == {"5001": "UIBUTTON", "5002": "CAMERA"}, f"a connection for each proxy ({conns})")
+
+# The tile: an icon set for each state the driver sends, at every size, inside the .c4z
+nav = root.find("capabilities/navigator_display_option")
+check(nav is not None and nav.get("proxybindingid") == "5001", "the tile's icons are for proxy 5001")
+states = {st.get("id"): [i.text for i in st.findall("Icon")] for st in nav.findall("display_icons/state")}
+sent = set(re.findall(r'(\w+) = "[^"]*"', re.search(r"TILE_TEXT = \{([^}]*)\}", open(os.path.join(ROOT, "src", "driver.lua"), encoding="utf-8").read()).group(1)))
+check(set(states) == sent == {"idle", "ring", "motion", "open", "offline"}, f"a state for each tile state the driver sends ({sorted(states)}, {sorted(sent)})")
+prefix = "controller://driver/DirectorLink-DoorBird/icons/"
+icons = [i.text for i in nav.findall("display_icons/Icon")] + [i for v in states.values() for i in v]
+check(all(i.startswith(prefix) for i in icons), "icon URLs point into this driver's .c4z (named DirectorLink-DoorBird)")
+missing = [i for i in icons if not os.path.exists(os.path.join(ROOT, "src", "www", "icons", i[len(prefix):]))]
+check(not missing and all(len(v) == 5 for v in states.values()), f"every tile icon exists, 5 sizes each {missing[:3] or ''}")
 
 # Property names the Lua reads all exist
 lua = open(os.path.join(ROOT, "src", "driver.lua"), encoding="utf-8").read()

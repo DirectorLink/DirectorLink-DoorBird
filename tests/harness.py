@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import os
+from urllib.parse import urlsplit
 import re
 import sys
 
@@ -45,6 +46,9 @@ function C4:SetPropertyAttribs(n, v) ATTRIBS[n] = v end
 function C4:SendToProxy(b, c, p, k) PROXY[#PROXY + 1] = { b, c, p } end
 function C4:SendToDevice(id, c, p, allowEmpty, log) DEVICE_CMDS[#DEVICE_CMDS + 1] = { id, c, p, log } end
 function C4:GetProxyDevices() return PROXY_DEVICE end
+CAMERA_DEVICE = 902
+function C4:GetProxyDevicesById(id) return PROXY_DEVICE, CAMERA_DEVICE end
+function C4:GetDevicesByC4iName(name) if name == "camera.c4i" then return { [CAMERA_DEVICE] = "DoorBird Camera" } end return {} end
 function C4:GetDeviceID() return DEVICE_ID end
 function C4:GetDeviceDisplayName(id) return DISPLAY_NAME end
 function C4:SendUIRequest(id) return PROXY_PROPS end
@@ -222,6 +226,7 @@ class Driver:
         self.lua = lupa.LuaRuntime(unpack_returned_tuples=True, encoding="latin-1")
         g = self.lua.globals()
         self.responder = responder or (lambda m, u, h, b: (None, None, None))
+        self.listening = set()  # other ports of the controller where a copy of the driver answers
         g.PY_HASH = py_hash
         g.PY_B64D = lambda s: base64.b64decode(s).decode("latin-1")
         g.PY_HTTP = self._http
@@ -239,6 +244,9 @@ class Driver:
 
     def _http(self, method, url, headers, body):
         h = dict(headers) if headers is not None else {}
+        parts = urlsplit(url)
+        if parts.hostname == self.g.CONTROLLER_IP and parts.port in self.listening:
+            return 404, self.lua.table_from({}), "Not found\n"
         code, rh, rb = self.responder(method, url, h, body)
         if code is None:
             return None, None, None

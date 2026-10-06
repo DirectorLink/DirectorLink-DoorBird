@@ -45,46 +45,50 @@
 <main>
 <div class="links">Free. No subscription, no license key, no account with us. Downloads, updates and help: see the address above.</div>
 
+<h2>What you get</h2>
+<p>Two devices in the room: <b>DoorBird</b>, the tile in the Control4 apps, whose icon shows a ring, motion, the gate opening or the DoorBird offline, and which <b>opens the gate with a tap</b> (<b>Gate Relay</b>); and <b>DoorBird Camera</b>, for pictures, live video and the picture in notifications.</p>
+
 <h2>Setup</h2>
 <ol class="steps">
   <li><b>Make a DoorBird user for Control4.</b> In the DoorBird app: <i>Settings &rarr; Administration</i> (log in with the administration user), <i>User &rarr; Add</i>. Turn on the permissions <b>API-Operator</b>, <b>Watch Always</b>, <b>History</b> and <b>Motion</b>, and save. Note its username (for example <code>ghchdi0002</code>) and password.</li>
   <li><b>Give the DoorBird a fixed IP address</b> in the router.</li>
-  <li>In this driver's properties enter <b>Address</b> (the DoorBird's IP), <b>Username</b> and <b>Password</b>. <b>Status</b> says <i>Online - events live</i> within half a minute.</li>
-  <li><b>Doors and gates:</b> under <i>Connections &rarr; Control</i>, bind <b>Relay 1</b> (and the others) to a Control4 <i>Relay Door</i>, <i>Gate</i> or <i>Garage Controller</i>.</li>
+  <li>In this driver's properties enter <b>Address</b> (the DoorBird's IP), <b>Username</b> and <b>Password</b>. <b>Status</b> says <i>Online - events live</i> within half a minute, and <b>DoorBird</b> shows the model, firmware and relays.</li>
+  <li><b>The gate:</b> <b>Gate Relay</b> (<i>Relay 1</i> by default, or <i>Nothing</i>) is what a tap on the tile opens. For a Control4 <i>Relay Gate</i>, <i>Door</i> or <i>Garage Controller</i>, bind it under <i>Connections &rarr; Control</i> to <b>Relay 1</b> (or another relay).</li>
 </ol>
 <p class="note"><b>Next to the official DoorBird driver.</b> Both can run on the same DoorBird and the same controller, each with its own DoorBird user. This driver changes only what it made on the DoorBird. <b>Control4 Intercom and audio/SIP are not part of this driver:</b> if you use Control4 Intercom with the DoorBird, keep the official DoorBird driver for that.</p>
+<p class="note"><b>Coming from 1.0.0-beta.1?</b> Beta.2 adds different devices, so it cannot update a beta.1 in place: run <b>Remove From DoorBird</b> on beta.1 and delete it, then add beta.2 and make its bindings and programming again.</p>
 
 <h2>How it works</h2>
-<p><b>Events</b>, the way Home Assistant does it: the driver runs a small HTTP server on the controller and adds its own <b>HTTP calls</b> on the DoorBird, named <code>DirectorLink (doorbell 1)</code>, <code>DirectorLink (motion)</code>, <code>DirectorLink (RFID)</code>, <code>DirectorLink (relay 1)</code>, each with a random token in its address. It puts them into the DoorBird's schedule for each doorbell button, motion, the RFID tags and each relay, the whole week. Every other HTTP call, push notification, SIP call and relay in the schedule stays as it was: each entry is read just before it is written and checked right after, and put back if the DoorBird dropped or changed anything else. The event server listens on a port from 47300, shown in <b>Events</b>. The driver takes a call only from the DoorBird's address and with its token. The same event again within 5 seconds is one event.</p>
-<p><b>Pictures and video</b>: the camera's Properties page gets the DoorBird's address and this user's Basic login: <code>bha-api/image.cgi</code> for pictures, RTSP H.264 (<code>mpeg/media.amp</code>, port 554 or RTSP over HTTP on 8557) for live video, MJPEG (<code>bha-api/video.cgi</code>) as the fallback. Change the login in the driver's properties, not on the camera page: the driver puts the page back.</p>
+<p><b>Events</b>, the way Home Assistant does it: the driver runs a small HTTP server on the controller (a port from 47300, shown by Print Diagnostics) and adds its own <b>HTTP calls</b> on the DoorBird, named <code>DirectorLink (doorbell 1)</code>, <code>DirectorLink (keypad code &hellip;)</code>, <code>DirectorLink (motion)</code>, <code>DirectorLink (RFID)</code>, <code>DirectorLink (relay 1)</code>, each with a random token in its address. It puts them into the DoorBird's schedule for each doorbell button, keypad code, motion, the RFID tags and each relay, the whole week. Every other HTTP call, push notification, SIP call and relay in the schedule stays as it was: each entry is read just before it is written and checked right after, and put back if the DoorBird dropped or changed anything else. The driver takes a call only from the DoorBird's address and with its token. The same event again within 5 seconds is one event.</p>
+<p><b>Keypad codes</b> (a DoorBird with a keypad): entering a code fires <i>Keypad Code Entered</i> and sets <code>LAST_KEYPAD_CODE</code> for programming; the code still does on the DoorBird what it did before. A code opens a door, so it is masked like the password: never in a log, Status, Print Diagnostics or the Control4 History. RFID tag numbers are masked too (a tag can be copied from its number).</p>
+<p><b>Pictures and video</b>: the DoorBird Camera's Properties page gets the DoorBird's address and this user's Basic login: <code>bha-api/image.cgi</code> for pictures, RTSP H.264 (<code>mpeg/media.amp</code>, port 554) for live video, MJPEG (<code>bha-api/video.cgi</code>) as the fallback. Where port 554 is blocked, set <b>RTSP Port</b> 8557 (RTSP over HTTP) on the camera page: the driver keeps it. Change the login in this driver's properties, not on the camera page: the driver puts the page back.</p>
 <p><b>Relays</b> are pulsed (<code>open-door.cgi</code>): the DoorBird energizes the relay for its own set time. A relay is never held. A second pulse for the same relay within 2 seconds is not sent.</p>
 <p><b>Leaving the DoorBird</b>: when the Address changes, or you run <b>Remove From DoorBird</b>, it takes its HTTP calls out of the schedule first and deletes them after. <b>Run Remove From DoorBird before deleting the driver</b>: a deleted driver starts the same, but Control4 may stop it before it is done.</p>
 
 <h2>Properties</h2>
 <table>
   <tr><th>Property</th><th>Description</th></tr>
-  <tr><td>Address · Username · Password</td><td>The DoorBird's IP and the Control4 user's login. The password is never logged.</td></tr>
-  <tr><td>Status · Attention</td><td>Health in plain words; what to fix (a missing permission, a refused login, an event the DoorBird would not take).</td></tr>
-  <tr><td>DoorBird · MAC Address · Relays · Doorbell Buttons</td><td>From <code>info.cgi</code> and the schedule: model, firmware, MAC, relays (with the relays of paired I/O door controllers), buttons.</td></tr>
-  <tr><td>Permissions</td><td>API-Operator (events), Watch Always (live video, pictures, opening doors at any time), History (ring pictures), Motion (motion pictures).</td></tr>
-  <tr><td>Events · Last Event</td><td>The registered events and the event server; the last event.</td></tr>
-  <tr><td>Alert On Motion · Motion Alert Hold Time (s)</td><td>Off by default. On: motion also raises <i>Alert</i>, once per visit (no new alert until this long without motion).</td></tr>
-  <tr><td>Picture With Events · Record In History</td><td>A picture for notifications at each ring and alert (Ring and Alert wait up to 1.5 s for it); Control4 History entries.</td></tr>
-  <tr><td>Live Video</td><td>RTSP (port 554), or RTSP over HTTP (port 8557) for networks where 554 is blocked.</td></tr>
+  <tr><td>Status</td><td>What the driver is doing in plain words, and the first thing to fix if there is one (a missing permission, a refused login, an event the DoorBird would not take).</td></tr>
+  <tr><td>DoorBird</td><td>Model, firmware and relays, from <code>info.cgi</code>.</td></tr>
+  <tr><td>Address &middot; Username &middot; Password</td><td>The DoorBird's IP and the Control4 user's login. The password is never logged.</td></tr>
+  <tr><td>Gate Relay</td><td>Relay 1 (default), Relay 2 or Nothing: what a tap on the tile and <i>Open Gate</i> open (a pulse).</td></tr>
+  <tr><td>Alert On Motion</td><td>Off by default. On: motion also raises <i>Alert</i>, once per visit (no new alert until a minute without motion).</td></tr>
+  <tr><td>Log Level</td><td><i>Debug</i> shows every request to the DoorBird and every call from it in the Lua tab (never the password, the token, a keypad code or an RFID tag number).</td></tr>
 </table>
-<p><b>Actions:</b> Print Diagnostics (device, firmware, relays, this driver's HTTP calls and schedule entries, the last events and requests) &middot; Test Pictures &middot; Reconnect &middot; Open Door (Relay 1) &middot; IR Light On &middot; Remove From DoorBird. Set <b>Log Level</b> to <i>Debug</i> to see every request and every call from the DoorBird in the Lua tab.</p>
+<p><b>Actions:</b> Print Diagnostics (driver version, MAC, permissions, buttons and keypad codes, the event server and its self-test, this driver's HTTP calls and schedule entries, the last events and requests, the camera page) &middot; Test Pictures &middot; Reconnect &middot; Open Gate &middot; IR Light On &middot; Remove From DoorBird.</p>
 
 <h2>Programming reference</h2>
 <h3>Events</h3>
-<p><b>Ring</b> (any button) &middot; <b>Doorbell Pressed (Button 1)</b>, one per button &middot; <b>Motion Detected</b> &middot; <b>Alert</b> (motion, with Alert On Motion) &middot; <b>RFID Read</b> &middot; <b>Door Opened (Relay 1)</b>, one per relay &middot; <b>Door Opened</b> (any relay) &middot; DoorBird Online &middot; DoorBird Offline.</p>
+<p><b>Ring</b> (any button) &middot; <b>Ring (Button 2)</b> &hellip;, one per button on a DoorBird with several &middot; <b>Keypad Code Entered</b> &middot; <b>Motion Detected</b> &middot; <b>Alert</b> (motion, with Alert On Motion) &middot; <b>RFID Read</b> &middot; <b>Door Opened</b> (<code>LAST_RELAY</code> says which relay) &middot; DoorBird Online &middot; DoorBird Offline.</p>
 <h3>Variables</h3>
-<p><code>DIRECTORLINK_CAMERA</code>, <code>DIRECTORLINK_CAMERA_KIND</code>, <code>LAST_ALERT</code>, <code>LAST_RING</code>, <code>LAST_MOTION</code>, <code>LAST_DOORBELL</code> (the button), <code>LAST_RFID</code>, <code>LAST_RELAY</code>, <code>LAST_DOOR_OPENED</code>, <code>LAST_EVENT</code> (STRING); <code>ONLINE</code> (BOOL). Times are ISO 8601 UTC, for example <code>2026-10-05T18:30:00Z</code>.</p>
+<p><code>DIRECTORLINK_CAMERA</code>, <code>DIRECTORLINK_CAMERA_KIND</code>, <code>LAST_ALERT</code>, <code>LAST_RING</code>, <code>LAST_MOTION</code>, <code>LAST_DOORBELL</code> (the button), <code>LAST_RFID</code>, <code>LAST_RELAY</code>, <code>LAST_DOOR_OPENED</code>, <code>LAST_EVENT</code>, <code>LAST_KEYPAD_CODE</code> (STRING); <code>ONLINE</code> (BOOL). Times are ISO 8601 UTC, for example <code>2026-10-05T18:30:00Z</code>.</p>
 <h3>Commands, conditionals, connections</h3>
 <p>Commands: <code>OPEN_DOOR</code> (a relay of the DoorBird), <code>LIGHT_ON</code> (the IR light), <code>SET_ALERT_ON_MOTION</code> (On, Off, Toggle). Conditionals: DoorBird is Online &middot; Alert on motion is On. Connections: <b>Relay 1</b>, <b>Relay 2</b>, ... one per DoorBird relay (RELAY, a pulse only). Notification attachment: <i>Picture at the last ring or motion alert</i>.</p>
 
 <h2>Change log</h2>
 <table>
   <tr><th>Version</th><th>Changes</th></tr>
+  <tr><td>1.0.0-beta.2</td><td>Two devices: the DoorBird tile (shows rings, motion, the gate, offline; a tap opens the gate) and the DoorBird Camera. Eight properties; Gate Relay and Open Gate. Keypad codes (masked in logs). Ring per button only with several buttons, one Door Opened. Not an update for beta.1.</td></tr>
   <tr><td>1.0.0-beta.1</td><td>First release (beta).</td></tr>
 </table>
 

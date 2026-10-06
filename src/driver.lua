@@ -26,8 +26,9 @@
     Always, History, Motion) and enters its login in the driver's properties.
     Control4 Intercom and audio/SIP are not part of this driver.
 
-    DirectorLink camera agreement v1: variables DIRECTORLINK_CAMERA = "1" and
-    DIRECTORLINK_CAMERA_KIND = "doorbell"; a doorbell press sets LAST_RING
+    DirectorLink camera agreement v1: variables DIRECTORLINK_CAMERA = "1",
+    DIRECTORLINK_CAMERA_KIND = "doorbell" and DIRECTORLINK_CAMERA_EVENTS =
+    "Alert=1,Ring=2" (the ids of those two events); a doorbell press sets LAST_RING
     (ISO 8601 UTC), then fires "Ring"; a motion alert sets LAST_ALERT =
     "Motion", then fires "Alert".
 
@@ -54,6 +55,7 @@ OLD_RETRY_MAX = 96            -- for a day
 OLD_MAX = 3
 EVENT_PORT_BASE = 47300
 BUTTON_EVENT_BASE, RELAY_BINDING_BASE = 100, 300
+DIRECTORLINK_CAMERA_EVENTS = "Alert=1,Ring=2" -- the ids of events "Alert" and "Ring" in driver.xml (never change)
 RTSP_PORT = 554
 RTSP_PORTS = { [554] = true, [8557] = true } -- RTSP, or RTSP over HTTP where 554 is blocked: set on the camera page
 RTSP_PATH = "mpeg/media.amp"
@@ -1354,6 +1356,7 @@ local function PrintDiagnostics()
 		lines[#lines + 1] = "Video         : rtsp://" .. gBird.host .. ":" .. tostring(p and RTSP_PORTS[p.rtspPort or 0] and p.rtspPort or RTSP_PORT) .. "/" .. RTSP_PATH .. " (H.264), MJPEG http://" .. gBird.host .. "/" .. MJPEG_PATH
 			.. ", snapshot http://" .. gBird.host .. "/" .. SNAPSHOT_PATH
 		lines[#lines + 1] = "Variables     : DIRECTORLINK_CAMERA=" .. tostring(GetVar("DIRECTORLINK_CAMERA")) .. " KIND=" .. tostring(GetVar("DIRECTORLINK_CAMERA_KIND"))
+			.. " EVENTS=" .. tostring(GetVar("DIRECTORLINK_CAMERA_EVENTS"))
 			.. " LAST_RING=" .. tostring(GetVar("LAST_RING")) .. " LAST_ALERT=" .. tostring(GetVar("LAST_ALERT"))
 		lines[#lines + 1] = "Alerts        : Alert On Motion " .. tostring(Properties["Alert On Motion"]) .. ", once per " .. MOTION_ALERT_HOLD_S .. " s without motion"
 		for _, o in ipairs(gCfg.olds) do
@@ -1525,12 +1528,14 @@ local VARIABLES = {
 	{ "LAST_EVENT", "", "STRING" },
 	{ "ONLINE", "0", "BOOL" },
 	{ "LAST_KEYPAD_CODE", "", "STRING" },
+	{ "DIRECTORLINK_CAMERA_EVENTS", DIRECTORLINK_CAMERA_EVENTS, "STRING" },
 }
 
 -- Written on every start, so they are right after a driver update too
 local function SetAgreementVariables()
 	SetVar("DIRECTORLINK_CAMERA", "1", true)
 	SetVar("DIRECTORLINK_CAMERA_KIND", "doorbell", true)
+	SetVar("DIRECTORLINK_CAMERA_EVENTS", DIRECTORLINK_CAMERA_EVENTS, true)
 end
 
 function OnDriverInit()
@@ -1540,7 +1545,7 @@ function OnDriverInit()
 	-- Director starts added variables at their default: the last ring, alert and the rest come back
 	for _, v in ipairs(VARIABLES) do
 		local saved = gState.savedVars[v[1]]
-		if type(saved) == "string" and v[3] == "STRING" and v[1] ~= "DIRECTORLINK_CAMERA" and v[1] ~= "DIRECTORLINK_CAMERA_KIND" then v[2] = saved end
+		if type(saved) == "string" and v[3] == "STRING" and string.sub(v[1], 1, 13) ~= "DIRECTORLINK_" then v[2] = saved end
 	end
 	AddVariables(VARIABLES)
 	RestoreRelayBindings()

@@ -81,13 +81,15 @@
 <h3>Events</h3>
 <p><b>Ring</b> (any button) &middot; <b>Ring (Button 2)</b> &hellip;, one per button on a DoorBird with several &middot; <b>Keypad Code Entered</b> &middot; <b>Motion Detected</b> &middot; <b>Alert</b> (motion, with Alert On Motion) &middot; <b>RFID Read</b> &middot; <b>Door Opened</b> (<code>LAST_RELAY</code> says which relay) &middot; DoorBird Online &middot; DoorBird Offline.</p>
 <h3>Variables</h3>
-<p><code>DIRECTORLINK_CAMERA</code>, <code>DIRECTORLINK_CAMERA_KIND</code>, <code>LAST_ALERT</code>, <code>LAST_RING</code>, <code>LAST_MOTION</code>, <code>LAST_DOORBELL</code> (the button), <code>LAST_RFID</code>, <code>LAST_RELAY</code>, <code>LAST_DOOR_OPENED</code>, <code>LAST_EVENT</code>, <code>LAST_KEYPAD_CODE</code> (STRING); <code>ONLINE</code> (BOOL). Times are ISO 8601 UTC, for example <code>2026-10-05T18:30:00Z</code>.</p>
+<p><code>DIRECTORLINK_CAMERA</code>, <code>DIRECTORLINK_CAMERA_KIND</code>, <code>LAST_ALERT</code>, <code>LAST_RING</code>, <code>LAST_MOTION</code>, <code>LAST_DOORBELL</code> (the button), <code>LAST_RFID</code>, <code>LAST_RELAY</code>, <code>LAST_DOOR_OPENED</code>, <code>LAST_EVENT</code>, <code>LAST_KEYPAD_CODE</code>, <code>DIRECTORLINK_CAMERA_EVENTS</code> (STRING); <code>ONLINE</code> (BOOL). Times are ISO 8601 UTC, for example <code>2026-10-05T18:30:00Z</code>.</p>
+<p><b>With DirectorLink</b> (not required): the driver sets <code>DIRECTORLINK_CAMERA</code> = <code>1</code>, <code>DIRECTORLINK_CAMERA_KIND</code> = <code>doorbell</code> and <code>DIRECTORLINK_CAMERA_EVENTS</code> = <code>Alert=1,Ring=2</code>, the ids of its <i>Alert</i> and <i>Ring</i> events, and writes them again on every start. A ring sets <code>LAST_RING</code>, then fires <i>Ring</i>; a motion alert sets <code>LAST_ALERT</code>, then fires <i>Alert</i>.</p>
 <h3>Commands, conditionals, connections</h3>
 <p>Commands: <code>OPEN_DOOR</code> (a relay of the DoorBird), <code>LIGHT_ON</code> (the IR light), <code>SET_ALERT_ON_MOTION</code> (On, Off, Toggle). Conditionals: DoorBird is Online &middot; Alert on motion is On. Connections: <b>Relay 1</b>, <b>Relay 2</b>, ... one per DoorBird relay (RELAY, a pulse only). Notification attachment: <i>Picture at the last ring or motion alert</i>.</p>
 
 <h2>Change log</h2>
 <table>
   <tr><th>Version</th><th>Changes</th></tr>
+  <tr><td>1.0.1</td><td>The variable <code>DIRECTORLINK_CAMERA_EVENTS</code> = <code>Alert=1,Ring=2</code> for DirectorLink.</td></tr>
   <tr><td>1.0.0</td><td>First full release: the 1.0.0-beta.3 driver, tested on a DoorBird D2101KV.</td></tr>
   <tr><td>1.0.0-beta.3</td><td>The tile shows the gate opening after a ring (the ring hid it).</td></tr>
   <tr><td>1.0.0-beta.2</td><td>Two devices: the DoorBird tile (shows rings, motion, the gate, offline; a tap opens the gate) and the DoorBird Camera. Eight properties; Gate Relay and Open Gate. Keypad codes (masked in logs). Ring per button only with several buttons, one Door Opened. Not an update for beta.1.</td></tr>

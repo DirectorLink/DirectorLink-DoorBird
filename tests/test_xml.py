@@ -59,6 +59,14 @@ family = ([p.get("name") for p in root.findall("proxies/proxy")] + [e.findtext("
           + [c.findtext("connectionname") for c in root.findall("connections/connection")]
           + [c.findtext("name") for c in root.findall("conditionals/conditional")])
 check(not [n for n in family if "directorlink" in (n or "").lower()], "no brand in proxy, event, connection or conditional names")
+DISCLAIMER = ("DirectorLink is an independent project, not affiliated with Control4 or Snap One. "
+              "Not affiliated with or endorsed by Bird Home Automation. Product names are trademarks of their owners.")
+notes = ["README.md", "CHANGELOG.md", os.path.join("src", "www", "documentation.html")] + sorted(
+    os.path.join("docs", "releases", f) for f in os.listdir(os.path.join(ROOT, "docs", "releases")) if f.endswith(".md"))
+missing = [n for n in notes if DISCLAIMER not in open(os.path.join(ROOT, n), encoding="utf-8").read()]
+check(not missing, f"the disclaimer is in the README, the documentation, the change log and every release note {missing or ''}")
+check(os.path.exists(os.path.join(ROOT, "docs", "releases", "v" + open(os.path.join(ROOT, "VERSION")).read().strip() + ".md")),
+      "release notes for the version in VERSION")
 
 # The DirectorLink camera agreement v1: events named exactly "Alert" and "Ring" (ids 1 and 2, never to change)
 ev = {e.findtext("name"): e.findtext("id") for e in events}

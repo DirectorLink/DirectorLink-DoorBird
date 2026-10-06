@@ -10,9 +10,10 @@ password, the event token or another app's URL.
 """
 import base64
 import copy
+import os
 import re
 
-from harness import Driver, check, finish
+from harness import ROOT, Driver, check, finish
 from fake_doorbird import HOST, PASSWORD, USER, DoorBird
 
 PROPS = {"Address": HOST, "Username": USER, "Password": PASSWORD, "Log Level": "Debug"}
@@ -59,7 +60,13 @@ token = d.token()
 check(isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token or "") is not None, "a random 32-character event token")
 check(d.var("DIRECTORLINK_CAMERA") == "1" and d.var("DIRECTORLINK_CAMERA_KIND") == "doorbell", "DirectorLink agreement: DIRECTORLINK_CAMERA = 1, kind doorbell")
 order = list(d.g.VAR_ORDER.values())
-check(order[:4] == ["DIRECTORLINK_CAMERA", "DIRECTORLINK_CAMERA_KIND", "LAST_ALERT", "LAST_RING"], f"variables keep their order ({order[:4]})")
+check(order == ["DIRECTORLINK_CAMERA", "DIRECTORLINK_CAMERA_KIND", "LAST_ALERT", "LAST_RING", "LAST_MOTION", "LAST_DOORBELL", "LAST_RFID",
+                "LAST_RELAY", "LAST_DOOR_OPENED", "LAST_EVENT", "ONLINE", "LAST_KEYPAD_CODE", "DIRECTORLINK_CAMERA_EVENTS"],
+      f"variables keep their order, new ones only at the end ({order})")
+check(d.var("DIRECTORLINK_CAMERA_EVENTS") == "Alert=1,Ring=2", f"DirectorLink agreement: DIRECTORLINK_CAMERA_EVENTS = Alert=1,Ring=2 ({d.var('DIRECTORLINK_CAMERA_EVENTS')})")
+xml_events = dict(re.findall(r"<event><id>(\d+)</id><name>([^<]+)</name>", open(os.path.join(ROOT, "src", "driver.xml"), encoding="utf-8").read()))
+check(d.var("DIRECTORLINK_CAMERA_EVENTS") == f"Alert={next(i for i, n in xml_events.items() if n == 'Alert')},Ring={next(i for i, n in xml_events.items() if n == 'Ring')}",
+      "and it names the ids driver.xml gives Alert and Ring")
 check(d.server_port() == 47300, f"event server on port 47300 ({d.server_port()})")
 check(bird.requests("/bha-api/info.cgi")[0]["user"] == USER, "info.cgi with the Control4 user's Basic login")
 check(d.prop("DoorBird") == "DoorBird D2101V · firmware 000141 · relays 1, 2", f"the DoorBird line: model, firmware, its own relays ({d.prop('DoorBird')})")
@@ -351,6 +358,19 @@ check(not writes, f"a restart writes nothing to the DoorBird ({[(c['path'], c['q
 check(d2.token() == token and d2.dyn_events() == d.dyn_events(), "same token, same programming events")
 check(d2.var("LAST_RING") == d.var("LAST_RING") and d2.var("LAST_DOORBELL") == "1", "LAST_RING and the rest come back after a restart")
 check(d2.prop("Status") == "Online - events live", f"and it is live again ({d2.prop('Status')})")
+
+# The agreement variables are written on every start (an update from 1.0.0 adds DIRECTORLINK_CAMERA_EVENTS at the end)
+d2.call("SetVar", "DIRECTORLINK_CAMERA_EVENTS", "something else")
+check(d2.var("DIRECTORLINK_CAMERA_EVENTS") == "something else", "(the variable changed)")
+d2.call("OnDriverLateInit", "DIT_UPDATING")
+check(d2.var("DIRECTORLINK_CAMERA_EVENTS") == "Alert=1,Ring=2" and d2.var("DIRECTORLINK_CAMERA") == "1" and d2.var("DIRECTORLINK_CAMERA_KIND") == "doorbell",
+      "every start writes the DirectorLink variables again")
+old = dict(d.persisted())
+old["DL_VARS"] = '{"LAST_RING":"2026-10-05T18:30:00Z","DIRECTORLINK_CAMERA_EVENTS":"Alert=9,Ring=9"}'
+d3, _ = setup(bird=DoorBird(), persist=old, start=False)
+d3.start(dit="DIT_UPDATING")
+check(d3.var("DIRECTORLINK_CAMERA_EVENTS") == "Alert=1,Ring=2" and d3.var("LAST_RING") == "2026-10-05T18:30:00Z",
+      "a saved value never replaces it (the saved LAST_RING comes back)")
 
 # ================================================================ the controller's address changes
 d2.g.CONTROLLER_IP = "192.168.50.11"

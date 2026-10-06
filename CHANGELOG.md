@@ -2,6 +2,12 @@
 
 All notable changes to DirectorLink · DoorBird for Control4. Versions follow the `VERSION` file; the driver version Composer compares is in brackets.
 
+## 1.0.1 (1000199) - 2026-10-06
+
+- New string variable `DIRECTORLINK_CAMERA_EVENTS` = `Alert=1,Ring=2`: the ids of the *Alert* and *Ring* events, so DirectorLink finds them by what the driver says. It comes after the existing variables (their order does not change) and, like `DIRECTORLINK_CAMERA`, is written on every start, also after an update.
+- **Print Diagnostics** shows it with the other DirectorLink variables.
+- The change log and the release notes carry the DirectorLink disclaimer.
+
 ## 1.0.0 (1000099) - 2026-10-06
 
 First full release. The driver is the same as 1.0.0-beta.3, tested on a DoorBird D2101KV (firmware 000152): the login, pictures, registering the events next to other apps' HTTP calls, rings, motion, the gate opening (*Door Opened*), the tile, and opening the gate with a tap on the tile, confirmed in the controller's log.
@@ -44,3 +50,7 @@ First release, a **beta**: built on DoorBird's published LAN API (revision 0.36)
 - The DoorBird's limits respected: one request at a time, at most one per second; a refused login costs one request (the DoorBird never locks out the controller, so the official DoorBird driver keeps working), and the camera page gets a login only once the DoorBird took it; a 423 lockout is waited out.
 - **Print Diagnostics** (device, firmware, relays, the event server's self-test, this driver's favorites and schedule entries, the last events and requests), **Test Pictures**, Debug lines for every request and every call, never with the password or the token.
 - Not included: Control4 Intercom and audio/SIP (keep the official DoorBird driver for those).
+
+---
+
+DirectorLink is an independent project, not affiliated with Control4 or Snap One. Not affiliated with or endorsed by Bird Home Automation. Product names are trademarks of their owners.

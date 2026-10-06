@@ -128,7 +128,7 @@ Rings, keypad codes, motion alerts and doors opened are also written to the Cont
 
 DirectorLink 1.10 and newer shows the DoorBird as a doorbell in the DirectorLink app as soon as both are installed. Nothing needs to be set up: the driver follows the DirectorLink camera agreement, so DirectorLink recognizes it by what it says, not by its file name.
 
-- **Rings with the live picture on the phone.** The driver sets `DIRECTORLINK_CAMERA` = `1` and `DIRECTORLINK_CAMERA_KIND` = `doorbell`. Each press of a button sets `LAST_RING` to the time (ISO 8601 UTC), then fires *Ring*. DirectorLink takes the picture the way Control4 apps do, from the camera's Properties page, so the DoorBird login never leaves the controller.
+- **Rings with the live picture on the phone.** The driver sets `DIRECTORLINK_CAMERA` = `1`, `DIRECTORLINK_CAMERA_KIND` = `doorbell` and `DIRECTORLINK_CAMERA_EVENTS` = `Alert=1,Ring=2` (the ids of its *Alert* and *Ring* events, so DirectorLink finds them by what the driver says). It writes them again on every start, also after an update. Each press of a button sets `LAST_RING` to the time (ISO 8601 UTC), then fires *Ring*. DirectorLink takes the picture the way Control4 apps do, from the camera's Properties page, so the DoorBird login never leaves the controller.
 - **Motion alerts.** With **Alert On Motion** = *On*, motion sets `LAST_ALERT` to `Motion`, then fires *Alert*, once per visit.
 - **Opening the gate with two taps.** Bind the DoorBird's relay to a Control4 Relay Gate (or Door) Controller and DirectorLink opens it with two taps. The driver pulses the relay: it is never held.
 
@@ -146,7 +146,7 @@ Without DirectorLink the driver works the same.
 ### Reference
 
 - **Events:** Ring · Ring (Button n), one per button on a DoorBird with several · Keypad Code Entered · Motion Detected · Alert · RFID Read · Door Opened · DoorBird Online · DoorBird Offline
-- **Variables:** `DIRECTORLINK_CAMERA` `DIRECTORLINK_CAMERA_KIND` `LAST_ALERT` `LAST_RING` `LAST_MOTION` `LAST_DOORBELL` `LAST_RFID` `LAST_RELAY` `LAST_DOOR_OPENED` `LAST_EVENT` (STRING) · `ONLINE` (BOOL) · `LAST_KEYPAD_CODE` (STRING). Times are ISO 8601 UTC.
+- **Variables:** `DIRECTORLINK_CAMERA` `DIRECTORLINK_CAMERA_KIND` `LAST_ALERT` `LAST_RING` `LAST_MOTION` `LAST_DOORBELL` `LAST_RFID` `LAST_RELAY` `LAST_DOOR_OPENED` `LAST_EVENT` (STRING) · `ONLINE` (BOOL) · `LAST_KEYPAD_CODE` `DIRECTORLINK_CAMERA_EVENTS` (STRING). Times are ISO 8601 UTC.
 - **Conditionals:** DoorBird is Online · Alert on motion is On
 - **Commands:** `OPEN_DOOR` (a relay, from the DoorBird's list) · `LIGHT_ON` · `SET_ALERT_ON_MOTION` (On/Off/Toggle)
 - **Connections** (Connections → Control): Relay 1, Relay 2, ... one per DoorBird relay (RELAY). CLOSE, TRIGGER and TOGGLE pulse the relay once; OPEN sends nothing (the relay is at rest). A second pulse within 2 seconds is not sent.
